@@ -1167,7 +1167,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               <span className="text-sm font-medium">Mes listes · {activeTab.label} ({activeTab.items.length})</span>
               <Icon name={favDrawerOpen ? "chevronDown" : "chevronUp"} size={18} color={C.inkMuted} />
             </button>
-            <div className="px-5 flex gap-2 mb-2 overflow-x-auto scrollbar-none">
+            <div className="px-5 py-1 flex gap-2 mb-1 overflow-x-auto scrollbar-none">
               {drawerTabs.map((t) => (
                 <button key={t.id} onClick={() => setFavDrawerTab(t.id)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
                   style={{ background: favDrawerTab === t.id ? t.color : C.bg, color: favDrawerTab === t.id ? t.dark : C.ink, border: `1px solid ${C.border}` }}>
