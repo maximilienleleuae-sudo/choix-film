@@ -164,7 +164,7 @@ function CeSoir() {
       if (key?.value) setTmdbKey(key.value);
       const tp = await storageGet("taste-profile");
       if (tp?.value) { try { setTasteProfile(JSON.parse(tp.value)); } catch {} }
-      const wh = await storageGet("watch-history");
+      const wh = await storageGet("watch-history-v2");
       if (wh?.value) { try { setWatchHistory(JSON.parse(wh.value)); } catch {} }
       const hp = await storageGet("history-posters");
       if (hp?.value) { try { setHistoryPosters(JSON.parse(hp.value)); } catch {} }
@@ -269,7 +269,7 @@ function CeSoir() {
     const { rows, uniqueTitles } = parseNetflixCsv(text);
     if (!rows.length) return;
     setWatchHistory(rows);
-    await storageSet("watch-history", JSON.stringify(rows));
+    await storageSet("watch-history-v2", JSON.stringify(rows));
 
     if (!silent) { setCsvLoading(true); setCsvStatus(`Analyse de ${Math.min(40, uniqueTitles.length)} titres sur ${uniqueTitles.length}…`); }
     const profile = await buildTasteProfile(uniqueTitles, key);
