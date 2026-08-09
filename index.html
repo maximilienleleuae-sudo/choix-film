@@ -35,6 +35,11 @@ const { useState, useEffect, useCallback, useRef } = React;
 // ---------------------------------------------------------------------------
 const WORKER_URL = "https://royal-smoke-0062.maximilien-leleu-ae.workers.dev";
 
+// CSV Netflix hébergé sur le site (à côté d'index.html) — chargé automatiquement au
+// premier lancement si aucun historique n'est déjà en local. L'import manuel (Réglages)
+// reste possible et écrase ce chargement automatique.
+const DEFAULT_CSV_URL = "./NetflixViewingHistory.csv";
+
 // ---------------------------------------------------------------------------
 // Tokens
 // ---------------------------------------------------------------------------
@@ -94,6 +99,8 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     film: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M17 9h4M3 15h4M17 15h4"/></>,
     tv: <><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 22h8M12 18v4"/></>,
     trash: <><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14"/></>,
+    history: <><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l4 2"/></>,
+    search: <><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -113,6 +120,12 @@ function CeSoir() {
   const [tasteProfile, setTasteProfile] = useState(null);
   const [csvStatus, setCsvStatus] = useState("");
   const [csvLoading, setCsvLoading] = useState(false);
+
+  const [watchHistory, setWatchHistory] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState("");
+  const autoLoadedRef = useRef(false);
+  const autoSuggestedRef = useRef(false);
 
   const [moodInput, setMoodInput] = useState("");
   const [moodLoading, setMoodLoading] = useState(false);
@@ -147,6 +160,8 @@ function CeSoir() {
       if (key?.value) setTmdbKey(key.value);
       const tp = await storageGet("taste-profile");
       if (tp?.value) { try { setTasteProfile(JSON.parse(tp.value)); } catch {} }
+      const wh = await storageGet("watch-history");
+      if (wh?.value) { try { setWatchHistory(JSON.parse(wh.value)); } catch {} }
       const seen = await storageGet("seen-ids");
       if (seen?.value) { try { setSeenIds(new Set(JSON.parse(seen.value))); } catch {} }
       const favs = await storageGet("favorites");
@@ -183,6 +198,58 @@ function CeSoir() {
 
   useEffect(() => { if (tmdbKey) loadGenres(tmdbKey); }, [tmdbKey, loadGenres]);
 
+  // Parse un export CSV Netflix ("Title,Date") en lignes {title, date}, plus liste unique de titres.
+  function parseNetflixCsv(text) {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const header = lines[0]?.toLowerCase().split(",") || [];
+    let titleIdx = header.findIndex((h) => h.includes("title"));
+    if (titleIdx === -1) titleIdx = 0;
+    let dateIdx = header.findIndex((h) => h.includes("date"));
+
+    const rows = lines.slice(1).map((line) => {
+      const cells = line.match(/(".*?"|[^,]+)(?=,|$)/g) || [];
+      const rawTitle = (cells[titleIdx] || "").replace(/^"|"$/g, "").trim();
+      const date = dateIdx !== -1 ? (cells[dateIdx] || "").replace(/^"|"$/g, "").trim() : "";
+      return { title: rawTitle.split(":")[0].trim(), date };
+    }).filter((r) => r.title);
+
+    const uniqueTitles = [...new Set(rows.map((r) => r.title))];
+    return { rows, uniqueTitles };
+  }
+
+  // Analyse un échantillon de titres via TMDB pour en déduire un profil de goûts (genres dominants).
+  async function buildTasteProfile(uniqueTitles, key) {
+    const sample = uniqueTitles.slice(0, 40);
+    const genreCount = {};
+    let matched = 0;
+    for (const t of sample) {
+      try {
+        const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${key}&language=fr-FR&query=${encodeURIComponent(t)}`).then(safeJson);
+        const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
+        if (hit) { matched++; (hit.genre_ids || []).forEach((g) => (genreCount[g] = (genreCount[g] || 0) + 1)); }
+      } catch {}
+    }
+    const topIds = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => Number(id));
+    const names = Object.entries(genreMap).filter(([, ids]) => topIds.includes(ids.movie) || topIds.includes(ids.tv)).map(([name]) => name);
+    return { genreIds: topIds, names, sampleCount: matched, total: uniqueTitles.length };
+  }
+
+  async function processCsvText(text, key, { silent = false } = {}) {
+    const { rows, uniqueTitles } = parseNetflixCsv(text);
+    if (!rows.length) return;
+    setWatchHistory(rows);
+    await storageSet("watch-history", JSON.stringify(rows));
+
+    if (!silent) { setCsvLoading(true); setCsvStatus(`Analyse de ${Math.min(40, uniqueTitles.length)} titres sur ${uniqueTitles.length}…`); }
+    const profile = await buildTasteProfile(uniqueTitles, key);
+    setTasteProfile(profile);
+    await storageSet("taste-profile", JSON.stringify(profile));
+    if (!silent) {
+      setCsvLoading(false);
+      setCsvStatus(`${profile.sampleCount} titres reconnus sur ${Math.min(40, uniqueTitles.length)} · goûts dominants : ${profile.names.slice(0, 4).join(", ") || "non déterminés"}`);
+    }
+  }
+
   function handleCsvFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -190,41 +257,36 @@ function CeSoir() {
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const text = String(ev.target.result || "");
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      const header = lines[0]?.toLowerCase().split(",") || [];
-      let titleIdx = header.findIndex((h) => h.includes("title"));
-      if (titleIdx === -1) titleIdx = 0;
-      const rawTitles = lines.slice(1).map((line) => {
-        const cells = line.match(/(".*?"|[^,]+)(?=,|$)/g) || [];
-        const t = (cells[titleIdx] || "").replace(/^"|"$/g, "").trim();
-        return t.split(":")[0].trim();
-      }).filter(Boolean);
-
-      const unique = [...new Set(rawTitles)];
-      const sample = unique.slice(0, 40);
-      setCsvLoading(true);
-      setCsvStatus(`Analyse de ${sample.length} titres sur ${unique.length}…`);
-
-      const genreCount = {};
-      let matched = 0;
-      for (const t of sample) {
-        try {
-          const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${tmdbKey}&language=fr-FR&query=${encodeURIComponent(t)}`).then(safeJson);
-          const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
-          if (hit) { matched++; (hit.genre_ids || []).forEach((g) => (genreCount[g] = (genreCount[g] || 0) + 1)); }
-        } catch {}
-      }
-      const topIds = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => Number(id));
-      const names = Object.entries(genreMap).filter(([, ids]) => topIds.includes(ids.movie) || topIds.includes(ids.tv)).map(([name]) => name);
-
-      const profile = { genreIds: topIds, names, sampleCount: matched, total: unique.length };
-      setTasteProfile(profile);
-      await storageSet("taste-profile", JSON.stringify(profile));
-      setCsvLoading(false);
-      setCsvStatus(`${matched} titres reconnus sur ${sample.length} · goûts dominants : ${names.slice(0, 4).join(", ") || "non déterminés"}`);
+      await processCsvText(text, tmdbKey, { silent: false });
+      showToast("Historique importé — remplace l'historique précédent");
     };
     reader.readAsText(file);
   }
+
+  // Chargement automatique de l'historique hébergé sur le site, une seule fois, si aucun
+  // historique local n'existe déjà (import manuel prioritaire).
+  useEffect(() => {
+    if (!tmdbKey || !genresLoaded || autoLoadedRef.current) return;
+    autoLoadedRef.current = true;
+    if (watchHistory.length > 0) return; // déjà un historique (importé ou déjà auto-chargé)
+    (async () => {
+      try {
+        const res = await fetch(DEFAULT_CSV_URL);
+        if (!res.ok) return;
+        const text = await res.text();
+        await processCsvText(text, tmdbKey, { silent: true });
+      } catch {}
+    })();
+  }, [tmdbKey, genresLoaded]);
+
+  // Suggestions par défaut à l'arrivée sur l'écran (une seule fois), pour ne pas laisser
+  // l'écran vide : pioche pondérée par le profil de goûts si dispo, sinon popularité générale.
+  useEffect(() => {
+    if (!booted || !tmdbKey || !genresLoaded || autoSuggestedRef.current) return;
+    if (resultsLoading || results.length) return;
+    autoSuggestedRef.current = true;
+    runDiscover({ genreIds: tasteProfile?.genreIds?.length ? tasteProfile.genreIds : [] });
+  }, [booted, tmdbKey, genresLoaded, tasteProfile, results.length, resultsLoading]);
 
   const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], yearFrom, yearTo, page = 1 } = {}) => {
     if (!tmdbKey) { setSettingsOpen(true); showToast("Ajoute ta clé TMDB pour lancer une recherche"); return; }
@@ -367,9 +429,14 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           <p className="font-mono text-xs tracking-widest" style={{ color: C.amberDim }}>SÉANCE DU SOIR</p>
           <h1 className="font-display text-3xl">Ce soir</h1>
         </div>
-        <button onClick={() => setSettingsOpen(true)} aria-label="Réglages" className="p-2 rounded-full" style={{ background: C.bgCard }}>
-          <Icon name="settings" color={C.inkMuted} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setHistoryOpen(true)} aria-label="Historique Netflix" className="p-2 rounded-full" style={{ background: C.bgCard }}>
+            <Icon name="history" color={C.inkMuted} />
+          </button>
+          <button onClick={() => setSettingsOpen(true)} aria-label="Réglages" className="p-2 rounded-full" style={{ background: C.bgCard }}>
+            <Icon name="settings" color={C.inkMuted} />
+          </button>
+        </div>
       </header>
 
       <div className="px-5 pt-4">
@@ -516,17 +583,52 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
             {!tmdbKey && <p className="text-xs mb-4" style={{ color: C.inkMuted }}>Sans clé, aucune recherche n'est possible.</p>}
 
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>HISTORIQUE NETFLIX (export CSV)</label>
+            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Un historique par défaut est déjà chargé depuis le site. Importer un fichier ci-dessous le remplace.</p>
             <label className="flex items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm mb-1 cursor-pointer" style={{ background: C.bg, border: `1px dashed ${C.border}`, color: C.ink }}>
-              <Icon name="upload" size={16} /> Importer le fichier CSV
+              <Icon name="upload" size={16} /> Importer un autre fichier CSV
               <input type="file" accept=".csv" className="hidden" onChange={handleCsvFile} />
             </label>
             {csvLoading && <p className="text-xs mb-4 flex items-center gap-1.5" style={{ color: C.inkMuted }}><Icon name="loader" size={12} color={C.inkMuted} /> {csvStatus}</p>}
             {!csvLoading && csvStatus && <p className="text-xs mb-4" style={{ color: C.teal }}>{csvStatus}</p>}
-            {!csvStatus && !csvLoading && tasteProfile && <p className="text-xs mb-4" style={{ color: C.teal }}>Profil déjà chargé · goûts : {tasteProfile.names.slice(0, 4).join(", ") || "—"}</p>}
+            {!csvStatus && !csvLoading && tasteProfile && <p className="text-xs mb-1" style={{ color: C.teal }}>Profil chargé · goûts : {tasteProfile.names.slice(0, 4).join(", ") || "—"}</p>}
+            {!csvStatus && !csvLoading && watchHistory.length > 0 && <p className="text-xs mb-4" style={{ color: C.inkMuted }}>{watchHistory.length} titres dans l'historique — voir l'onglet Historique (icône en haut).</p>}
 
             <button onClick={resetSeenAndFavorites} className="w-full text-center text-xs py-2.5 rounded-lg" style={{ color: C.danger, border: `1px solid ${C.border}` }}>
               Réinitialiser « déjà vu » et sélection
             </button>
+          </div>
+        </div>
+      )}
+
+      {historyOpen && (
+        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setHistoryOpen(false)}>
+          <div className="w-full rounded-t-2xl p-5 flex flex-col" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-display text-xl">Historique Netflix ({watchHistory.length})</h3>
+              <button onClick={() => setHistoryOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+            </div>
+            {watchHistory.length === 0 && (
+              <p className="text-sm" style={{ color: C.inkMuted }}>Aucun historique chargé pour l'instant. Ajoute ta clé TMDB dans les Réglages pour charger l'export CSV du site, ou importe le tien.</p>
+            )}
+            {watchHistory.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 rounded-lg px-3 py-2 mb-3" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+                  <Icon name="search" size={14} color={C.inkMuted} />
+                  <input value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value)} placeholder="Filtrer par titre…"
+                    className="flex-1 bg-transparent text-sm outline-none" style={{ color: C.ink }} />
+                </div>
+                <div className="overflow-y-auto flex-1" style={{ minHeight: 0 }}>
+                  {watchHistory
+                    .filter((r) => r.title.toLowerCase().includes(historyFilter.trim().toLowerCase()))
+                    .map((r, i) => (
+                      <div key={i} className="flex items-center justify-between gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <p className="text-sm truncate">{r.title}</p>
+                        <p className="font-mono text-[11px] shrink-0" style={{ color: C.inkMuted }}>{r.date || "—"}</p>
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
