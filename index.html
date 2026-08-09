@@ -814,10 +814,15 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       </div>
 
       <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
-        <button onClick={() => { const t = mediaType === "movie" ? "tv" : "movie"; setMediaType(t); runDiscover({ type: t }); }}
-          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5" style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }}>
-          <Icon name={mediaType === "movie" ? "film" : "tv"} size={13} />
-          {mediaType === "movie" ? "Films" : "Séries"}
+        <button onClick={() => { setMediaType("movie"); runDiscover({ type: "movie" }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
+          style={{ background: mediaType === "movie" ? C.amber : C.bgCard, color: mediaType === "movie" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+          <Icon name="film" size={13} /> Films
+        </button>
+        <button onClick={() => { setMediaType("tv"); runDiscover({ type: "tv" }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
+          style={{ background: mediaType === "tv" ? C.amber : C.bgCard, color: mediaType === "tv" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+          <Icon name="tv" size={13} /> Séries
         </button>
         {["Comédie", "Drame", "Thriller", "Action", "Science-Fiction", "Horreur", "Romance", "Animation"].map((g) => (
           <button key={g} onClick={() => toggleGenre(g)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium"
