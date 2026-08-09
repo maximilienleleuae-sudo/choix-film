@@ -350,6 +350,14 @@ function CeSoir() {
     return { year, month: Number(m[1]), day: Number(m[2]) };
   }
 
+  // Le CSV Netflix est au format US M/D/YY (ex: "8/5/26" = 5 août 2026) — reformaté en JJ/MM/AA pour l'affichage.
+  function formatDateFR(d) {
+    const parsed = parseNetflixDate(d);
+    if (!parsed) return d || "—";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(parsed.day)}/${pad(parsed.month)}/${pad(parsed.year % 100)}`;
+  }
+
   // Analyse un échantillon de titres via TMDB pour en déduire un profil de goûts (genres dominants).
   async function buildTasteProfile(uniqueTitles) {
     const sample = uniqueTitles.slice(0, 40);
@@ -1129,7 +1137,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                               )}
                             </div>
                             <p className="text-[11px] mt-1 truncate">{g.title}</p>
-                            <p className="font-mono text-[10px]" style={{ color: C.inkMuted }}>{g.lastDate}</p>
+                            <p className="font-mono text-[10px]" style={{ color: C.inkMuted }}>{formatDateFR(g.lastDate)}</p>
                           </button>
                         );
                       })}
@@ -1139,6 +1147,10 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                   {historyView === "list" && filteredHistory.map((g) => {
                     const poster = historyPosters[g.title];
                     const isOpen = expandedSeries === g.title;
+                    const key = poster?.id ? `${poster.mediaType}-${poster.id}` : null;
+                    const isLiked = key && likedItems.some((f) => f.key === key);
+                    const isDisliked = key && dislikedItems.some((f) => f.key === key);
+                    const historyItem = poster?.id ? { id: poster.id, media_type: poster.mediaType, title: g.title, poster_path: poster.poster, genre_ids: poster.genreIds } : null;
                     return (
                       <div key={g.title} style={{ borderBottom: `1px solid ${C.border}` }}>
                         <div className="w-full flex items-center gap-3 py-2.5 text-left">
@@ -1151,16 +1163,26 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                               <p className="text-sm truncate">{g.title}</p>
                               {g.count > 1 && <p className="text-xs" style={{ color: C.teal }}>{g.count} épisodes</p>}
                             </div>
-                            <p className="font-mono text-xs shrink-0" style={{ color: C.ink }}>{g.lastDate || "—"}</p>
+                            <p className="font-mono text-xs shrink-0" style={{ color: C.ink }}>{formatDateFR(g.lastDate) || "—"}</p>
                             {g.count > 1 && <Icon name={isOpen ? "chevronUp" : "chevronDown"} size={14} color={C.inkMuted} />}
                           </button>
+                          {historyItem && (
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <button onClick={() => addLike(historyItem)} aria-label="J'aime" className="p-1 rounded-full" style={{ background: isLiked ? "#1E3A22" : "transparent" }}>
+                                <Icon name="thumbsUp" size={14} color="#5FAE6C" fill={isLiked ? "#5FAE6C" : "none"} />
+                              </button>
+                              <button onClick={() => addDislike(historyItem)} aria-label="J'aime pas" className="p-1 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
+                                <Icon name="thumbsDown" size={14} color={C.danger} fill={isDisliked ? C.danger : "none"} />
+                              </button>
+                            </div>
+                          )}
                         </div>
                         {isOpen && g.count > 1 && (
                           <div className="pl-11 pb-2 flex flex-col gap-1.5">
                             {g.episodes.map((e, i) => (
                               <div key={i} className="flex items-center justify-between gap-3">
                                 <p className="text-xs truncate" style={{ color: C.inkMuted }}>{e.episode}</p>
-                                <p className="font-mono text-[11px] shrink-0" style={{ color: C.inkMuted }}>{e.date}</p>
+                                <p className="font-mono text-[11px] shrink-0" style={{ color: C.inkMuted }}>{formatDateFR(e.date)}</p>
                               </div>
                             ))}
                           </div>
