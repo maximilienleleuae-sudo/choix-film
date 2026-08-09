@@ -76,7 +76,23 @@ async function safeJson(res) {
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.json();
 }
+
+// Tous les appels TMDB passent par le Worker Cloudflare, qui détient la clé TMDB en secret
+// serveur (jamais exposée au navigateur) — voir /tmdb/* dans index.js.
+function tmdbUrl(path, params = {}) {
+  const p = new URLSearchParams({ language: "fr-FR", ...params });
+  return `${WORKER_URL}/tmdb${path}?${p.toString()}`;
+}
+async function tmdbFetch(path, params) { return fetch(tmdbUrl(path, params)).then(safeJson); }
 function yearOf(item) { const d = item.release_date || item.first_air_date; return d ? d.slice(0, 4) : "—"; }
+function momentOfDay() {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return "Ce matin";
+  if (h >= 12 && h < 14) return "Ce midi";
+  if (h >= 14 && h < 18) return "Cet après-midi";
+  if (h >= 18 && h < 23) return "Ce soir";
+  return "Cette nuit";
+}
 function titleOf(item) { return item.title || item.name || "Sans titre"; }
 
 // ---------------------------------------------------------------------------
@@ -114,8 +130,6 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
 // ---------------------------------------------------------------------------
 function CeSoir() {
   const [booted, setBooted] = useState(false);
-  const [tmdbKey, setTmdbKey] = useState("");
-  const [keyDraft, setKeyDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [genreMap, setGenreMap] = useState({});
@@ -174,8 +188,6 @@ function CeSoir() {
 
   useEffect(() => {
     (async () => {
-      const key = await storageGet("tmdb-api-key");
-      if (key?.value) setTmdbKey(key.value);
       const tp = await storageGet("taste-profile");
       if (tp?.value) { try { setTasteProfile(JSON.parse(tp.value)); } catch {} }
       const wh = await storageGet("watch-history-v2");
@@ -192,21 +204,11 @@ function CeSoir() {
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
 
-  async function saveKey() {
-    const k = keyDraft.trim();
-    if (!k) return;
-    setTmdbKey(k);
-    setKeyDraft("");
-    await storageSet("tmdb-api-key", k);
-    showToast("Clé TMDB enregistrée");
-  }
-
-  const loadGenres = useCallback(async (key) => {
-    if (!key) return;
+  const loadGenres = useCallback(async () => {
     try {
       const [gm, gt] = await Promise.all([
-        fetch(`https://api.themoviedb.org/3/genre/movie/list?api_key=${key}&language=fr-FR`).then(safeJson),
-        fetch(`https://api.themoviedb.org/3/genre/tv/list?api_key=${key}&language=fr-FR`).then(safeJson),
+        tmdbFetch("/genre/movie/list"),
+        tmdbFetch("/genre/tv/list"),
       ]);
       const map = {};
       gm.genres?.forEach((g) => { map[g.name.toLowerCase()] = { ...(map[g.name.toLowerCase()] || {}), movie: g.id }; });
@@ -216,7 +218,7 @@ function CeSoir() {
     } catch { setGenresLoaded(false); }
   }, []);
 
-  useEffect(() => { if (tmdbKey) loadGenres(tmdbKey); }, [tmdbKey, loadGenres]);
+  useEffect(() => { loadGenres(); }, [loadGenres]);
 
   // Parse un export CSV Netflix ("Title,Date"). Netflix log chaque épisode séparément au
   // format "Série: S1: Nom de l'épisode" — on sépare le nom de série (pour le regroupement
@@ -263,13 +265,13 @@ function CeSoir() {
   }
 
   // Analyse un échantillon de titres via TMDB pour en déduire un profil de goûts (genres dominants).
-  async function buildTasteProfile(uniqueTitles, key) {
+  async function buildTasteProfile(uniqueTitles) {
     const sample = uniqueTitles.slice(0, 40);
     const genreCount = {};
     let matched = 0;
     for (const t of sample) {
       try {
-        const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${key}&language=fr-FR&query=${encodeURIComponent(t)}`).then(safeJson);
+        const r = await tmdbFetch("/search/multi", { query: t });
         const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
         if (hit) { matched++; (hit.genre_ids || []).forEach((g) => (genreCount[g] = (genreCount[g] || 0) + 1)); }
       } catch {}
@@ -279,14 +281,14 @@ function CeSoir() {
     return { genreIds: topIds, names, sampleCount: matched, total: uniqueTitles.length };
   }
 
-  async function processCsvText(text, key, { silent = false } = {}) {
+  async function processCsvText(text, { silent = false } = {}) {
     const { rows, uniqueTitles } = parseNetflixCsv(text);
     if (!rows.length) return;
     setWatchHistory(rows);
     await storageSet("watch-history-v2", JSON.stringify(rows));
 
     if (!silent) { setCsvLoading(true); setCsvStatus(`Analyse de ${Math.min(40, uniqueTitles.length)} titres sur ${uniqueTitles.length}…`); }
-    const profile = await buildTasteProfile(uniqueTitles, key);
+    const profile = await buildTasteProfile(uniqueTitles);
     setTasteProfile(profile);
     await storageSet("taste-profile", JSON.stringify(profile));
     if (!silent) {
@@ -298,11 +300,10 @@ function CeSoir() {
   function handleCsvFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!tmdbKey) { showToast("Ajoute d'abord ta clé TMDB"); return; }
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const text = String(ev.target.result || "");
-      await processCsvText(text, tmdbKey, { silent: false });
+      await processCsvText(text, { silent: false });
       showToast("Historique importé — remplace l'historique précédent");
     };
     reader.readAsText(file);
@@ -311,7 +312,7 @@ function CeSoir() {
   // Chargement automatique de l'historique hébergé sur le site, une seule fois, si aucun
   // historique local n'existe déjà (import manuel prioritaire).
   useEffect(() => {
-    if (!tmdbKey || !genresLoaded || autoLoadedRef.current) return;
+    if (!genresLoaded || autoLoadedRef.current) return;
     autoLoadedRef.current = true;
     if (watchHistory.length > 0) return; // déjà un historique (importé ou déjà auto-chargé)
     (async () => {
@@ -319,19 +320,19 @@ function CeSoir() {
         const res = await fetch(DEFAULT_CSV_URL);
         if (!res.ok) return;
         const text = await res.text();
-        await processCsvText(text, tmdbKey, { silent: true });
+        await processCsvText(text, { silent: true });
       } catch {}
     })();
-  }, [tmdbKey, genresLoaded]);
+  }, [genresLoaded]);
 
   // Suggestions par défaut à l'arrivée sur l'écran (une seule fois), pour ne pas laisser
   // l'écran vide : pioche pondérée par le profil de goûts si dispo, sinon popularité générale.
   useEffect(() => {
-    if (!booted || !tmdbKey || !genresLoaded || autoSuggestedRef.current) return;
+    if (!booted || !genresLoaded || autoSuggestedRef.current) return;
     if (resultsLoading || results.length) return;
     autoSuggestedRef.current = true;
     runDiscover({ genreIds: tasteProfile?.genreIds?.length ? tasteProfile.genreIds : [] });
-  }, [booted, tmdbKey, genresLoaded, tasteProfile, results.length, resultsLoading]);
+  }, [booted, genresLoaded, tasteProfile, results.length, resultsLoading]);
 
   // Historique groupé par série/film (un titre Netflix = plusieurs épisodes = plusieurs lignes CSV).
   const groupedHistory = useMemo(() => groupHistory(watchHistory), [watchHistory]);
@@ -390,7 +391,7 @@ function CeSoir() {
   // Enrichissement TMDB différé : uniquement pour les titres actuellement visibles dans le
   // drawer Historique, et jamais deux fois pour le même titre (cache localStorage persistant).
   useEffect(() => {
-    if (!historyOpen || !tmdbKey) return;
+    if (!historyOpen) return;
     const toFetch = textYearFilteredHistory.slice(0, 60).filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title));
     if (!toFetch.length) return;
     let cancelled = false;
@@ -400,7 +401,7 @@ function CeSoir() {
         if (cancelled) break;
         fetchingPostersRef.current.add(g.title);
         try {
-          const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${tmdbKey}&language=fr-FR&query=${encodeURIComponent(g.title)}`).then(safeJson);
+          const r = await tmdbFetch("/search/multi", { query: g.title });
           const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
           updates[g.title] = hit ? { poster: hit.poster_path || null, mediaType: hit.media_type, id: hit.id, genreIds: hit.genre_ids || [] } : { poster: null };
         } catch { updates[g.title] = { poster: null }; }
@@ -413,45 +414,43 @@ function CeSoir() {
       });
     })();
     return () => { cancelled = true; };
-  }, [historyOpen, tmdbKey, textYearFilteredHistory, historyPosters]);
+  }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
   const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1 } = {}) => {
-    if (!tmdbKey) { setSettingsOpen(true); showToast("Ajoute ta clé TMDB pour lancer une recherche"); return; }
     setResultsLoading(true);
     setResultsError("");
     try {
-      const params = new URLSearchParams({ api_key: tmdbKey, language: "fr-FR", sort_by: sort, "vote_count.gte": "30", page: String(page) });
+      const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
       // la fois), ce qui ne renvoie quasiment jamais de résultat dès qu'on combine plusieurs genres.
-      if (genreIds.length) params.set("with_genres", genreIds.join("|"));
-      if (minVote) params.set("vote_average.gte", String(minVote));
-      if (castIds.length) params.set("with_cast", castIds.join(","));
-      if (keywordIds.length) params.set("with_keywords", keywordIds.join(","));
+      if (genreIds.length) params.with_genres = genreIds.join("|");
+      if (minVote) params["vote_average.gte"] = String(minVote);
+      if (castIds.length) params.with_cast = castIds.join(",");
+      if (keywordIds.length) params.with_keywords = keywordIds.join(",");
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
-      if (yearFrom) params.set(`${dateField}.gte`, `${yearFrom}-01-01`);
-      if (yearTo) params.set(`${dateField}.lte`, `${yearTo}-12-31`);
+      if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
+      if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
 
-      const url = `https://api.themoviedb.org/3/discover/${type === "movie" ? "movie" : "tv"}?${params.toString()}`;
-      const data = await fetch(url).then(safeJson);
+      const data = await tmdbFetch(`/discover/${type === "movie" ? "movie" : "tv"}`, params);
       const items = (data.results || []).map((it) => ({ ...it, media_type: type })).filter((it) => !seenIds.has(`${type}-${it.id}`));
       setResults(items);
       setCurrentIndex(0);
       if (!items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
-    } catch { setResultsError("Impossible de charger les suggestions (clé TMDB invalide ou hors-ligne ?)."); }
+    } catch { setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     setResultsLoading(false);
-  }, [tmdbKey, mediaType, activeGenreIds, minRating, sortBy, seenIds, lgbtActive, lgbtKeywordId]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, lgbtActive, lgbtKeywordId]);
 
   // Résout une seule fois l'id du mot-clé TMDB "lgbt" pour le filtre thématique de la home.
   useEffect(() => {
-    if (!tmdbKey || lgbtKeywordId) return;
+    if (lgbtKeywordId) return;
     (async () => {
       try {
-        const r = await fetch(`https://api.themoviedb.org/3/search/keyword?api_key=${tmdbKey}&query=lgbt`).then(safeJson);
+        const r = await tmdbFetch("/search/keyword", { query: "lgbt" });
         const hit = r.results?.find((k) => k.name.toLowerCase() === "lgbt") || r.results?.[0];
         if (hit) setLgbtKeywordId(hit.id);
       } catch {}
     })();
-  }, [tmdbKey, lgbtKeywordId]);
+  }, [lgbtKeywordId]);
 
   function toggleLgbt() {
     const next = !lgbtActive;
@@ -468,7 +467,7 @@ function CeSoir() {
     setDetailLoading(true);
     try {
       const kind = mt === "movie" ? "movie" : "tv";
-      const data = await fetch(`https://api.themoviedb.org/3/${kind}/${id}?api_key=${tmdbKey}&language=fr-FR&append_to_response=credits,videos`).then(safeJson);
+      const data = await tmdbFetch(`/${kind}/${id}`, { append_to_response: "credits,videos" });
       setDetailData(data);
     } catch { setDetailData({ error: true }); }
     setDetailLoading(false);
@@ -477,7 +476,6 @@ function CeSoir() {
   async function runMoodSearch() {
     const prompt = moodInput.trim();
     if (!prompt) return;
-    if (!tmdbKey) { setSettingsOpen(true); showToast("Ajoute ta clé TMDB pour lancer une recherche"); return; }
     setMoodLoading(true);
     setMoodError("");
     try {
@@ -501,7 +499,7 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
       let castIds = [];
       if (parsed.cast_names?.length) {
         const found = await Promise.all(parsed.cast_names.slice(0, 3).map((name) =>
-          fetch(`https://api.themoviedb.org/3/search/person?api_key=${tmdbKey}&query=${encodeURIComponent(name)}`).then(safeJson).then((r) => r.results?.[0]?.id).catch(() => null)
+          tmdbFetch("/search/person", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
         ));
         castIds = found.filter(Boolean);
       }
@@ -547,10 +545,10 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
     setTrailerOpenFor(item.id); setTrailerLoading(true); setTrailerUrl("");
     try {
       const kind = item.media_type === "movie" ? "movie" : "tv";
-      let data = await fetch(`https://api.themoviedb.org/3/${kind}/${item.id}/videos?api_key=${tmdbKey}&language=fr-FR`).then(safeJson);
+      let data = await tmdbFetch(`/${kind}/${item.id}/videos`);
       let vid = data.results?.find((v) => v.site === "YouTube" && v.type === "Trailer");
       if (!vid) {
-        data = await fetch(`https://api.themoviedb.org/3/${kind}/${item.id}/videos?api_key=${tmdbKey}&language=en-US`).then(safeJson);
+        data = await tmdbFetch(`/${kind}/${item.id}/videos`, { language: "en-US" });
         vid = data.results?.find((v) => v.site === "YouTube" && v.type === "Trailer") || data.results?.[0];
       }
       if (vid) setTrailerUrl(`https://www.youtube.com/embed/${vid.key}?autoplay=1`);
@@ -589,8 +587,8 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
       <header className="relative px-5 pt-6 pb-4 flex items-center justify-between overflow-hidden" style={{ borderBottom: `1px solid ${C.border}` }}>
         <div className="sweep absolute inset-y-0 left-0 w-1/3 pointer-events-none" style={{ background: `linear-gradient(90deg, transparent, ${C.amber}22, transparent)`, animation: "sweep 2.4s ease-out 1" }} />
         <div>
-          <p className="font-mono text-xs tracking-widest" style={{ color: C.amberDim }}>SÉANCE DU SOIR</p>
-          <h1 className="font-display text-3xl">Ce soir</h1>
+          <p className="font-mono text-xs tracking-widest" style={{ color: C.amberDim }}>QU'EST-CE QU'ON REGARDE ?</p>
+          <h1 className="font-display text-3xl">{momentOfDay()}</h1>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setHistoryOpen(true)} aria-label="Historique Netflix" className="p-2 rounded-full" style={{ background: C.bgCard }}>
@@ -793,15 +791,10 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
               <h3 className="font-display text-xl">Réglages</h3>
               <button onClick={() => setSettingsOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
-            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>CLÉ API TMDB (gratuite sur themoviedb.org)</label>
-            <div className="flex gap-2 mb-1">
-              <input value={keyDraft || tmdbKey} onChange={(e) => setKeyDraft(e.target.value)} placeholder="Colle ta clé v3 ici"
-                className="flex-1 rounded-lg px-3 py-2.5 text-sm" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }} />
-              <button onClick={saveKey} className="rounded-lg px-4 text-sm font-medium" style={{ background: C.amber, color: "#1A1305" }}>Enregistrer</button>
-            </div>
-            {tmdbKey && genresLoaded && <p className="text-xs mb-4" style={{ color: C.teal }}>Clé active ✓</p>}
-            {tmdbKey && !genresLoaded && <p className="text-xs mb-4" style={{ color: C.danger }}>Clé invalide ou hors-ligne</p>}
-            {!tmdbKey && <p className="text-xs mb-4" style={{ color: C.inkMuted }}>Sans clé, aucune recherche n'est possible.</p>}
+            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>CONNEXION TMDB</label>
+            <p className="text-xs mb-1" style={{ color: C.inkMuted }}>La clé TMDB est gérée côté serveur (Worker Cloudflare) — rien à saisir ici.</p>
+            {genresLoaded && <p className="text-xs mb-4" style={{ color: C.teal }}>Connectée ✓</p>}
+            {!genresLoaded && <p className="text-xs mb-4" style={{ color: C.danger }}>Hors ligne — vérifie que le Worker est déployé.</p>}
 
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>HISTORIQUE NETFLIX (export CSV)</label>
             <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Un historique par défaut est déjà chargé depuis le site. Importer un fichier ci-dessous le remplace.</p>
