@@ -28,7 +28,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useCallback, useRef } = React;
+const { useState, useEffect, useCallback, useRef, useMemo } = React;
 
 // ---------------------------------------------------------------------------
 // !!! À REMPLACER après déploiement du Worker Cloudflare (étape "wrangler deploy") !!!
@@ -124,6 +124,10 @@ function CeSoir() {
   const [watchHistory, setWatchHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyFilter, setHistoryFilter] = useState("");
+  const [historyYear, setHistoryYear] = useState("all");
+  const [expandedSeries, setExpandedSeries] = useState(null);
+  const [historyPosters, setHistoryPosters] = useState({});
+  const fetchingPostersRef = useRef(new Set());
   const autoLoadedRef = useRef(false);
   const autoSuggestedRef = useRef(false);
 
@@ -162,6 +166,8 @@ function CeSoir() {
       if (tp?.value) { try { setTasteProfile(JSON.parse(tp.value)); } catch {} }
       const wh = await storageGet("watch-history");
       if (wh?.value) { try { setWatchHistory(JSON.parse(wh.value)); } catch {} }
+      const hp = await storageGet("history-posters");
+      if (hp?.value) { try { setHistoryPosters(JSON.parse(hp.value)); } catch {} }
       const seen = await storageGet("seen-ids");
       if (seen?.value) { try { setSeenIds(new Set(JSON.parse(seen.value))); } catch {} }
       const favs = await storageGet("favorites");
@@ -198,7 +204,9 @@ function CeSoir() {
 
   useEffect(() => { if (tmdbKey) loadGenres(tmdbKey); }, [tmdbKey, loadGenres]);
 
-  // Parse un export CSV Netflix ("Title,Date") en lignes {title, date}, plus liste unique de titres.
+  // Parse un export CSV Netflix ("Title,Date"). Netflix log chaque épisode séparément au
+  // format "Série: S1: Nom de l'épisode" — on sépare le nom de série (pour le regroupement
+  // et la recherche TMDB) du détail d'épisode (gardé pour l'affichage détaillé).
   function parseNetflixCsv(text) {
     const lines = text.split(/\r?\n/).filter(Boolean);
     const header = lines[0]?.toLowerCase().split(",") || [];
@@ -210,11 +218,34 @@ function CeSoir() {
       const cells = line.match(/(".*?"|[^,]+)(?=,|$)/g) || [];
       const rawTitle = (cells[titleIdx] || "").replace(/^"|"$/g, "").trim();
       const date = dateIdx !== -1 ? (cells[dateIdx] || "").replace(/^"|"$/g, "").trim() : "";
-      return { title: rawTitle.split(":")[0].trim(), date };
-    }).filter((r) => r.title);
+      const parts = rawTitle.split(":");
+      const series = parts[0].trim();
+      const episode = parts.length > 1 ? parts.slice(1).join(":").trim() : "";
+      return { series, episode, date };
+    }).filter((r) => r.series);
 
-    const uniqueTitles = [...new Set(rows.map((r) => r.title))];
+    const uniqueTitles = [...new Set(rows.map((r) => r.series))];
     return { rows, uniqueTitles };
+  }
+
+  // Regroupe l'historique par série/film : compte les épisodes et retient la date la plus
+  // récente (le CSV Netflix liste toujours du plus récent au plus ancien).
+  function groupHistory(rows) {
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.series)) map.set(r.series, { title: r.series, count: 0, lastDate: r.date, episodes: [] });
+      const g = map.get(r.series);
+      g.count++;
+      if (r.episode) g.episodes.push({ episode: r.episode, date: r.date });
+    }
+    return [...map.values()];
+  }
+
+  function parseNetflixDate(d) {
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2})$/.exec((d || "").trim());
+    if (!m) return null;
+    const year = 2000 + Number(m[3]);
+    return { year, month: Number(m[1]), day: Number(m[2]) };
   }
 
   // Analyse un échantillon de titres via TMDB pour en déduire un profil de goûts (genres dominants).
@@ -287,6 +318,55 @@ function CeSoir() {
     autoSuggestedRef.current = true;
     runDiscover({ genreIds: tasteProfile?.genreIds?.length ? tasteProfile.genreIds : [] });
   }, [booted, tmdbKey, genresLoaded, tasteProfile, results.length, resultsLoading]);
+
+  // Historique groupé par série/film (un titre Netflix = plusieurs épisodes = plusieurs lignes CSV).
+  const groupedHistory = useMemo(() => groupHistory(watchHistory), [watchHistory]);
+
+  const historyYears = useMemo(() => {
+    const ys = new Set();
+    watchHistory.forEach((r) => { const d = parseNetflixDate(r.date); if (d) ys.add(d.year); });
+    return [...ys].sort((a, b) => b - a);
+  }, [watchHistory]);
+
+  const filteredHistory = useMemo(() => {
+    const q = historyFilter.trim().toLowerCase();
+    return groupedHistory.filter((g) => {
+      if (q && !g.title.toLowerCase().includes(q)) return false;
+      if (historyYear !== "all") {
+        const d = parseNetflixDate(g.lastDate);
+        if (!d || String(d.year) !== historyYear) return false;
+      }
+      return true;
+    });
+  }, [groupedHistory, historyFilter, historyYear]);
+
+  // Enrichissement TMDB différé : uniquement pour les titres actuellement visibles dans le
+  // drawer Historique, et jamais deux fois pour le même titre (cache localStorage persistant).
+  useEffect(() => {
+    if (!historyOpen || !tmdbKey) return;
+    const toFetch = filteredHistory.slice(0, 60).filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title));
+    if (!toFetch.length) return;
+    let cancelled = false;
+    (async () => {
+      const updates = {};
+      for (const g of toFetch) {
+        if (cancelled) break;
+        fetchingPostersRef.current.add(g.title);
+        try {
+          const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${tmdbKey}&language=fr-FR&query=${encodeURIComponent(g.title)}`).then(safeJson);
+          const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
+          updates[g.title] = hit ? { poster: hit.poster_path || null, mediaType: hit.media_type, id: hit.id } : { poster: null };
+        } catch { updates[g.title] = { poster: null }; }
+      }
+      if (cancelled || !Object.keys(updates).length) return;
+      setHistoryPosters((prev) => {
+        const next = { ...prev, ...updates };
+        storageSet("history-posters", JSON.stringify(next));
+        return next;
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [historyOpen, tmdbKey, filteredHistory, historyPosters]);
 
   const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], yearFrom, yearTo, page = 1 } = {}) => {
     if (!tmdbKey) { setSettingsOpen(true); showToast("Ajoute ta clé TMDB pour lancer une recherche"); return; }
@@ -604,7 +684,7 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
         <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setHistoryOpen(false)}>
           <div className="w-full rounded-t-2xl p-5 flex flex-col" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-display text-xl">Historique Netflix ({watchHistory.length})</h3>
+              <h3 className="font-display text-xl">Historique Netflix ({groupedHistory.length} titres · {watchHistory.length} visionnages)</h3>
               <button onClick={() => setHistoryOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
             {watchHistory.length === 0 && (
@@ -612,20 +692,50 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
             )}
             {watchHistory.length > 0 && (
               <>
-                <div className="flex items-center gap-2 rounded-lg px-3 py-2 mb-3" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
-                  <Icon name="search" size={14} color={C.inkMuted} />
-                  <input value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value)} placeholder="Filtrer par titre…"
-                    className="flex-1 bg-transparent text-sm outline-none" style={{ color: C.ink }} />
+                <div className="flex gap-2 mb-3">
+                  <div className="flex-1 flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+                    <Icon name="search" size={14} color={C.inkMuted} />
+                    <input value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value)} placeholder="Filtrer par titre…"
+                      className="flex-1 bg-transparent text-sm outline-none" style={{ color: C.ink }} />
+                  </div>
+                  <select value={historyYear} onChange={(e) => setHistoryYear(e.target.value)}
+                    className="rounded-lg px-2.5 text-sm" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>
+                    <option value="all">Toutes années</option>
+                    {historyYears.map((y) => <option key={y} value={String(y)}>{y}</option>)}
+                  </select>
                 </div>
                 <div className="overflow-y-auto flex-1" style={{ minHeight: 0 }}>
-                  {watchHistory
-                    .filter((r) => r.title.toLowerCase().includes(historyFilter.trim().toLowerCase()))
-                    .map((r, i) => (
-                      <div key={i} className="flex items-center justify-between gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <p className="text-sm truncate">{r.title}</p>
-                        <p className="font-mono text-[11px] shrink-0" style={{ color: C.inkMuted }}>{r.date || "—"}</p>
+                  {filteredHistory.length === 0 && <p className="text-xs py-3" style={{ color: C.inkMuted }}>Aucun résultat pour ce filtre.</p>}
+                  {filteredHistory.map((g) => {
+                    const poster = historyPosters[g.title];
+                    const isOpen = expandedSeries === g.title;
+                    return (
+                      <div key={g.title} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <button className="w-full flex items-center gap-3 py-2.5 text-left"
+                          onClick={() => g.count > 1 && setExpandedSeries(isOpen ? null : g.title)}>
+                          <img src={poster?.poster ? `https://image.tmdb.org/t/p/w92${poster.poster}` : FALLBACK_POSTER}
+                            alt="" className="w-8 h-11 object-cover rounded shrink-0" style={{ background: C.bg }} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm truncate">{g.title}</p>
+                            {g.count > 1 && <p className="text-xs" style={{ color: C.teal }}>{g.count} épisodes</p>}
+                          </div>
+                          <p className="font-mono text-xs shrink-0" style={{ color: C.ink }}>{g.lastDate || "—"}</p>
+                          {g.count > 1 && <Icon name={isOpen ? "chevronUp" : "chevronDown"} size={14} color={C.inkMuted} />}
+                        </button>
+                        {isOpen && g.count > 1 && (
+                          <div className="pl-11 pb-2 flex flex-col gap-1.5">
+                            {g.episodes.map((e, i) => (
+                              <div key={i} className="flex items-center justify-between gap-3">
+                                <p className="text-xs truncate" style={{ color: C.inkMuted }}>{e.episode}</p>
+                                <p className="font-mono text-[11px] shrink-0" style={{ color: C.inkMuted }}>{e.date}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ))}
+                    );
+                  })}
+                  {filteredHistory.length > 60 && <p className="text-[11px] pt-2" style={{ color: C.inkMuted }}>Affiches chargées pour les 60 premiers titres visibles · affine le filtre pour en voir plus.</p>}
                 </div>
               </>
             )}
