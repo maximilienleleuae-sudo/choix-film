@@ -101,6 +101,9 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     trash: <><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14"/></>,
     history: <><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l4 2"/></>,
     search: <><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></>,
+    grid: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
+    list: <><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></>,
+    chevronLeft: <path d="M15 18l-6-6 6-6"/>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -125,6 +128,9 @@ function CeSoir() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyFilter, setHistoryFilter] = useState("");
   const [historyYear, setHistoryYear] = useState("all");
+  const [historyView, setHistoryView] = useState("grid");
+  const [historyTypeFilter, setHistoryTypeFilter] = useState("all");
+  const [historyGenreFilter, setHistoryGenreFilter] = useState("all");
   const [expandedSeries, setExpandedSeries] = useState(null);
   const [historyPosters, setHistoryPosters] = useState({});
   const fetchingPostersRef = useRef(new Set());
@@ -139,11 +145,18 @@ function CeSoir() {
   const [activeGenreIds, setActiveGenreIds] = useState([]);
   const [minRating, setMinRating] = useState(0);
   const [sortBy, setSortBy] = useState("popularity.desc");
+  const [lgbtActive, setLgbtActive] = useState(false);
+  const [lgbtKeywordId, setLgbtKeywordId] = useState(null);
 
   const [results, setResults] = useState([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [resultsView, setResultsView] = useState("swipe");
+
+  const [detailItem, setDetailItem] = useState(null);
+  const [detailData, setDetailData] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const [seenIds, setSeenIds] = useState(new Set());
   const [favorites, setFavorites] = useState([]);
@@ -328,7 +341,26 @@ function CeSoir() {
     return [...ys].sort((a, b) => b - a);
   }, [watchHistory]);
 
-  const filteredHistory = useMemo(() => {
+  // Correspondance id de genre TMDB -> nom affichable (fr), déduite de genreMap {nom: {movie,tv}}.
+  const genreIdToName = useMemo(() => {
+    const map = {};
+    Object.entries(genreMap).forEach(([name, ids]) => {
+      if (ids.movie) map[ids.movie] = name;
+      if (ids.tv) map[ids.tv] = name;
+    });
+    return map;
+  }, [genreMap]);
+
+  // Catégories disponibles dans l'historique déjà enrichi (posters chargés = genres connus).
+  const historyGenreOptions = useMemo(() => {
+    const names = new Set();
+    Object.values(historyPosters).forEach((p) => (p.genreIds || []).forEach((id) => { if (genreIdToName[id]) names.add(genreIdToName[id]); }));
+    return [...names].sort();
+  }, [historyPosters, genreIdToName]);
+
+  // Filtre texte/année seulement — sert de base au chargement différé des affiches, pour que
+  // l'enrichissement progresse même quand un filtre film/série ou catégorie est actif.
+  const textYearFilteredHistory = useMemo(() => {
     const q = historyFilter.trim().toLowerCase();
     return groupedHistory.filter((g) => {
       if (q && !g.title.toLowerCase().includes(q)) return false;
@@ -340,11 +372,25 @@ function CeSoir() {
     });
   }, [groupedHistory, historyFilter, historyYear]);
 
+  // Filtre final affiché : ajoute film/série + catégorie, qui nécessitent que le titre soit
+  // déjà enrichi (affiche chargée) — les titres pas encore analysés sont masqués le temps
+  // qu'ils soient récupérés en arrière-plan.
+  const filteredHistory = useMemo(() => {
+    if (historyTypeFilter === "all" && historyGenreFilter === "all") return textYearFilteredHistory;
+    return textYearFilteredHistory.filter((g) => {
+      const p = historyPosters[g.title];
+      if (!p) return false;
+      if (historyTypeFilter !== "all" && p.mediaType !== historyTypeFilter) return false;
+      if (historyGenreFilter !== "all" && !(p.genreIds || []).some((id) => genreIdToName[id] === historyGenreFilter)) return false;
+      return true;
+    });
+  }, [textYearFilteredHistory, historyTypeFilter, historyGenreFilter, historyPosters, genreIdToName]);
+
   // Enrichissement TMDB différé : uniquement pour les titres actuellement visibles dans le
   // drawer Historique, et jamais deux fois pour le même titre (cache localStorage persistant).
   useEffect(() => {
     if (!historyOpen || !tmdbKey) return;
-    const toFetch = filteredHistory.slice(0, 60).filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title));
+    const toFetch = textYearFilteredHistory.slice(0, 60).filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title));
     if (!toFetch.length) return;
     let cancelled = false;
     (async () => {
@@ -355,7 +401,7 @@ function CeSoir() {
         try {
           const r = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${tmdbKey}&language=fr-FR&query=${encodeURIComponent(g.title)}`).then(safeJson);
           const hit = r.results?.find((x) => x.media_type === "movie" || x.media_type === "tv");
-          updates[g.title] = hit ? { poster: hit.poster_path || null, mediaType: hit.media_type, id: hit.id } : { poster: null };
+          updates[g.title] = hit ? { poster: hit.poster_path || null, mediaType: hit.media_type, id: hit.id, genreIds: hit.genre_ids || [] } : { poster: null };
         } catch { updates[g.title] = { poster: null }; }
       }
       if (cancelled || !Object.keys(updates).length) return;
@@ -366,9 +412,9 @@ function CeSoir() {
       });
     })();
     return () => { cancelled = true; };
-  }, [historyOpen, tmdbKey, filteredHistory, historyPosters]);
+  }, [historyOpen, tmdbKey, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], yearFrom, yearTo, page = 1 } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1 } = {}) => {
     if (!tmdbKey) { setSettingsOpen(true); showToast("Ajoute ta clé TMDB pour lancer une recherche"); return; }
     setResultsLoading(true);
     setResultsError("");
@@ -377,6 +423,7 @@ function CeSoir() {
       if (genreIds.length) params.set("with_genres", genreIds.join(","));
       if (minVote) params.set("vote_average.gte", String(minVote));
       if (castIds.length) params.set("with_cast", castIds.join(","));
+      if (keywordIds.length) params.set("with_keywords", keywordIds.join(","));
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params.set(`${dateField}.gte`, `${yearFrom}-01-01`);
       if (yearTo) params.set(`${dateField}.lte`, `${yearTo}-12-31`);
@@ -389,7 +436,40 @@ function CeSoir() {
       if (!items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { setResultsError("Impossible de charger les suggestions (clé TMDB invalide ou hors-ligne ?)."); }
     setResultsLoading(false);
-  }, [tmdbKey, mediaType, activeGenreIds, minRating, sortBy, seenIds]);
+  }, [tmdbKey, mediaType, activeGenreIds, minRating, sortBy, seenIds, lgbtActive, lgbtKeywordId]);
+
+  // Résout une seule fois l'id du mot-clé TMDB "lgbt" pour le filtre thématique de la home.
+  useEffect(() => {
+    if (!tmdbKey || lgbtKeywordId) return;
+    (async () => {
+      try {
+        const r = await fetch(`https://api.themoviedb.org/3/search/keyword?api_key=${tmdbKey}&query=lgbt`).then(safeJson);
+        const hit = r.results?.find((k) => k.name.toLowerCase() === "lgbt") || r.results?.[0];
+        if (hit) setLgbtKeywordId(hit.id);
+      } catch {}
+    })();
+  }, [tmdbKey, lgbtKeywordId]);
+
+  function toggleLgbt() {
+    const next = !lgbtActive;
+    setLgbtActive(next);
+    runDiscover({ keywordIds: next && lgbtKeywordId ? [lgbtKeywordId] : [] });
+  }
+
+  async function openDetail(item) {
+    const mt = item.media_type || item.mediaType;
+    const id = item.id;
+    if (!mt || !id) return;
+    setDetailItem({ id, media_type: mt });
+    setDetailData(null);
+    setDetailLoading(true);
+    try {
+      const kind = mt === "movie" ? "movie" : "tv";
+      const data = await fetch(`https://api.themoviedb.org/3/${kind}/${id}?api_key=${tmdbKey}&language=fr-FR&append_to_response=credits,videos`).then(safeJson);
+      setDetailData(data);
+    } catch { setDetailData({ error: true }); }
+    setDetailLoading(false);
+  }
 
   async function runMoodSearch() {
     const prompt = moodInput.trim();
@@ -543,6 +623,10 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
             {g}
           </button>
         ))}
+        <button onClick={toggleLgbt} disabled={!lgbtKeywordId} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium"
+          style={{ background: lgbtActive ? C.amber : C.bgCard, color: lgbtActive ? "#1A1305" : C.ink, border: `1px solid ${C.border}`, opacity: lgbtKeywordId ? 1 : 0.5 }}>
+          🏳️‍🌈 LGBT+
+        </button>
         <button onClick={() => { const v = minRating >= 7 ? 0 : 7; setMinRating(v); runDiscover({ minVote: v }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: minRating >= 7 ? C.amber : C.bgCard, color: minRating >= 7 ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="star" size={12} fill={minRating >= 7 ? "#1A1305" : "none"} /> 7+
@@ -553,10 +637,14 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           <option value="vote_average.desc">Tri : Note</option>
           <option value="primary_release_date.desc">Tri : Année</option>
         </select>
+        <button onClick={() => setResultsView((v) => (v === "swipe" ? "grid" : "swipe"))} className="shrink-0 rounded-full p-2" aria-label="Changer d'affichage"
+          style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+          <Icon name={resultsView === "swipe" ? "grid" : "list"} size={14} color={C.inkMuted} />
+        </button>
       </div>
 
-      <main className="flex-1 px-5 py-6 flex flex-col items-center justify-center relative" style={{ minHeight: 460 }}>
-        {resultsLoading && <Icon name="loader" color={C.amber} size={26} />}
+      <main className={`flex-1 px-5 py-6 relative ${resultsView === "grid" && results.length ? "" : "flex flex-col items-center justify-center"}`} style={{ minHeight: 460 }}>
+        {resultsLoading && <div className="flex justify-center"><Icon name="loader" color={C.amber} size={26} /></div>}
         {!resultsLoading && resultsError && <p className="text-sm text-center px-6" style={{ color: C.inkMuted }}>{resultsError}</p>}
         {!resultsLoading && !results.length && !resultsError && (
           <div className="text-center px-6">
@@ -565,7 +653,24 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           </div>
         )}
 
-        {!resultsLoading && current && (
+        {!resultsLoading && resultsView === "grid" && results.length > 0 && (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))" }}>
+            {results.map((it) => (
+              <button key={it.id + it.media_type} onClick={() => openDetail(it)} className="text-left">
+                <div className="rounded-lg overflow-hidden relative" style={{ aspectRatio: "2/3", background: C.bgCard, border: `1px solid ${C.border}` }}>
+                  <img src={it.poster_path ? `https://image.tmdb.org/t/p/w342${it.poster_path}` : FALLBACK_POSTER} alt="" className="w-full h-full object-cover" />
+                  <div className="absolute top-1.5 right-1.5 rounded-full px-1.5 py-0.5 flex items-center gap-0.5 font-mono text-[10px]" style={{ background: "#10121Ad0" }}>
+                    <Icon name="star" size={9} color={C.amber} fill={C.amber} /><span style={{ color: C.amber }}>{it.vote_average?.toFixed(1) ?? "—"}</span>
+                  </div>
+                </div>
+                <p className="text-xs mt-1 truncate">{titleOf(it)}</p>
+                <p className="font-mono text-[10px]" style={{ color: C.inkMuted }}>{yearOf(it)}</p>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {!resultsLoading && resultsView === "swipe" && current && (
           <div className="relative w-full max-w-sm" style={{ height: 460 }}>
             {next2.map((it, i) => (
               <div key={it.id + it.media_type} className="absolute inset-0 rounded-2xl"
@@ -611,7 +716,7 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           </div>
         )}
 
-        {!resultsLoading && results.length > 0 && !current && (
+        {!resultsLoading && resultsView === "swipe" && results.length > 0 && !current && (
           <div className="text-center px-6">
             <p className="font-display text-xl mb-2">Plus rien pour ce soir</p>
             <p className="text-sm" style={{ color: C.inkMuted }}>Lance une nouvelle recherche ou surprends-toi.</p>
@@ -685,14 +790,19 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           <div className="w-full rounded-t-2xl p-5 flex flex-col" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-display text-xl">Historique Netflix ({groupedHistory.length} titres · {watchHistory.length} visionnages)</h3>
-              <button onClick={() => setHistoryOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setHistoryView((v) => (v === "list" ? "grid" : "list"))} className="p-1.5 rounded-full" style={{ background: C.bg }} aria-label="Changer d'affichage">
+                  <Icon name={historyView === "list" ? "grid" : "list"} size={15} color={C.inkMuted} />
+                </button>
+                <button onClick={() => setHistoryOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+              </div>
             </div>
             {watchHistory.length === 0 && (
               <p className="text-sm" style={{ color: C.inkMuted }}>Aucun historique chargé pour l'instant. Ajoute ta clé TMDB dans les Réglages pour charger l'export CSV du site, ou importe le tien.</p>
             )}
             {watchHistory.length > 0 && (
               <>
-                <div className="flex gap-2 mb-3">
+                <div className="flex gap-2 mb-2">
                   <div className="flex-1 flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
                     <Icon name="search" size={14} color={C.inkMuted} />
                     <input value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value)} placeholder="Filtrer par titre…"
@@ -704,24 +814,66 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                     {historyYears.map((y) => <option key={y} value={String(y)}>{y}</option>)}
                   </select>
                 </div>
+                <div className="flex gap-2 mb-3 overflow-x-auto scrollbar-none">
+                  {[["all", "Tout"], ["movie", "Films"], ["tv", "Séries"]].map(([v, label]) => (
+                    <button key={v} onClick={() => setHistoryTypeFilter(v)} className="shrink-0 rounded-full px-3 py-1 text-xs font-medium"
+                      style={{ background: historyTypeFilter === v ? C.amber : C.bg, color: historyTypeFilter === v ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+                      {label}
+                    </button>
+                  ))}
+                  {historyGenreOptions.length > 0 && (
+                    <select value={historyGenreFilter} onChange={(e) => setHistoryGenreFilter(e.target.value)}
+                      className="shrink-0 rounded-full px-2.5 text-xs" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>
+                      <option value="all">Toutes catégories</option>
+                      {historyGenreOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  )}
+                </div>
+                {(historyTypeFilter !== "all" || historyGenreFilter !== "all") && (
+                  <p className="text-[11px] mb-2" style={{ color: C.inkMuted }}>Filtre film/série/catégorie limité aux titres déjà analysés (affiche chargée).</p>
+                )}
                 <div className="overflow-y-auto flex-1" style={{ minHeight: 0 }}>
                   {filteredHistory.length === 0 && <p className="text-xs py-3" style={{ color: C.inkMuted }}>Aucun résultat pour ce filtre.</p>}
-                  {filteredHistory.map((g) => {
+
+                  {historyView === "grid" && filteredHistory.length > 0 && (
+                    <div className="grid gap-3 pb-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))" }}>
+                      {filteredHistory.map((g) => {
+                        const poster = historyPosters[g.title];
+                        return (
+                          <button key={g.title} className="text-left" onClick={() => (poster?.id ? openDetail(poster) : null)}>
+                            <div className="rounded-lg overflow-hidden relative" style={{ aspectRatio: "2/3", background: C.bg, border: `1px solid ${C.border}` }}>
+                              <img src={poster?.poster ? `https://image.tmdb.org/t/p/w185${poster.poster}` : FALLBACK_POSTER} alt="" className="w-full h-full object-cover" />
+                              {g.count > 1 && (
+                                <div className="absolute top-1 right-1 rounded-full px-1.5 py-0.5 font-mono text-[10px]" style={{ background: "#10121Ad0", color: C.teal }}>×{g.count}</div>
+                              )}
+                            </div>
+                            <p className="text-[11px] mt-1 truncate">{g.title}</p>
+                            <p className="font-mono text-[10px]" style={{ color: C.inkMuted }}>{g.lastDate}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {historyView === "list" && filteredHistory.map((g) => {
                     const poster = historyPosters[g.title];
                     const isOpen = expandedSeries === g.title;
                     return (
                       <div key={g.title} style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <button className="w-full flex items-center gap-3 py-2.5 text-left"
-                          onClick={() => g.count > 1 && setExpandedSeries(isOpen ? null : g.title)}>
-                          <img src={poster?.poster ? `https://image.tmdb.org/t/p/w92${poster.poster}` : FALLBACK_POSTER}
-                            alt="" className="w-8 h-11 object-cover rounded shrink-0" style={{ background: C.bg }} />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm truncate">{g.title}</p>
-                            {g.count > 1 && <p className="text-xs" style={{ color: C.teal }}>{g.count} épisodes</p>}
-                          </div>
-                          <p className="font-mono text-xs shrink-0" style={{ color: C.ink }}>{g.lastDate || "—"}</p>
-                          {g.count > 1 && <Icon name={isOpen ? "chevronUp" : "chevronDown"} size={14} color={C.inkMuted} />}
-                        </button>
+                        <div className="w-full flex items-center gap-3 py-2.5 text-left">
+                          <button className="shrink-0" onClick={() => (poster?.id ? openDetail(poster) : null)}>
+                            <img src={poster?.poster ? `https://image.tmdb.org/t/p/w92${poster.poster}` : FALLBACK_POSTER}
+                              alt="" className="w-8 h-11 object-cover rounded" style={{ background: C.bg }} />
+                          </button>
+                          <button className="flex-1 min-w-0 flex items-center gap-3 text-left" onClick={() => g.count > 1 && setExpandedSeries(isOpen ? null : g.title)}>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm truncate">{g.title}</p>
+                              {g.count > 1 && <p className="text-xs" style={{ color: C.teal }}>{g.count} épisodes</p>}
+                            </div>
+                            <p className="font-mono text-xs shrink-0" style={{ color: C.ink }}>{g.lastDate || "—"}</p>
+                            {g.count > 1 && <Icon name={isOpen ? "chevronUp" : "chevronDown"} size={14} color={C.inkMuted} />}
+                          </button>
+                        </div>
                         {isOpen && g.count > 1 && (
                           <div className="pl-11 pb-2 flex flex-col gap-1.5">
                             {g.episodes.map((e, i) => (
@@ -739,6 +891,70 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {detailItem && (
+        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000b0" }} onClick={() => setDetailItem(null)}>
+          <div className="w-full rounded-t-2xl overflow-y-auto" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "92vh" }} onClick={(e) => e.stopPropagation()}>
+            {detailLoading && <div className="flex items-center justify-center" style={{ height: 300 }}><Icon name="loader" color={C.amber} size={26} /></div>}
+            {!detailLoading && detailData?.error && (
+              <div className="p-6 text-center">
+                <p className="text-sm mb-3" style={{ color: C.inkMuted }}>Impossible de charger la fiche.</p>
+                <button onClick={() => setDetailItem(null)} className="text-xs" style={{ color: C.amber }}>Fermer</button>
+              </div>
+            )}
+            {!detailLoading && detailData && !detailData.error && (() => {
+              const d = detailData;
+              const title = d.title || d.name;
+              const year = (d.release_date || d.first_air_date || "").slice(0, 4);
+              const trailer = d.videos?.results?.find((v) => v.site === "YouTube" && v.type === "Trailer") || d.videos?.results?.[0];
+              const cast = (d.credits?.cast || []).slice(0, 5);
+              return (
+                <>
+                  <div className="relative" style={{ aspectRatio: "16/9", background: "#000" }}>
+                    <button onClick={() => setDetailItem(null)} className="absolute top-3 right-3 z-10 p-2 rounded-full" style={{ background: "#10121Ad0" }} aria-label="Fermer">
+                      <Icon name="x" size={18} color={C.ink} />
+                    </button>
+                    {trailer ? (
+                      <iframe src={`https://www.youtube.com/embed/${trailer.key}`} className="w-full h-full" allow="autoplay; encrypted-media" title="Bande-annonce" />
+                    ) : (
+                      <img src={d.backdrop_path ? `https://image.tmdb.org/t/p/w780${d.backdrop_path}` : (d.poster_path ? `https://image.tmdb.org/t/p/w500${d.poster_path}` : FALLBACK_POSTER)} alt="" className="w-full h-full object-cover" />
+                    )}
+                  </div>
+                  <div className="p-5">
+                    <p className="font-mono text-[11px] tracking-wide mb-1" style={{ color: C.teal }}>{year || "—"} · {detailItem.media_type === "movie" ? "FILM" : "SÉRIE"}{d.runtime ? ` · ${d.runtime} min` : ""}{d.number_of_seasons ? ` · ${d.number_of_seasons} saison${d.number_of_seasons > 1 ? "s" : ""}` : ""}</p>
+                    <h2 className="font-display text-2xl leading-tight mb-2">{title}</h2>
+                    <div className="flex items-center gap-1 mb-3">
+                      <Icon name="star" size={14} color={C.amber} fill={C.amber} />
+                      <span className="text-sm font-medium" style={{ color: C.amber }}>{d.vote_average?.toFixed(1) ?? "—"}</span>
+                      <span className="text-xs ml-1" style={{ color: C.inkMuted }}>({d.vote_count ?? 0} votes)</span>
+                    </div>
+                    {(d.genres || []).length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {d.genres.map((g) => (
+                          <span key={g.id} className="rounded-full px-2.5 py-1 text-[11px]" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>{g.name}</span>
+                        ))}
+                      </div>
+                    )}
+                    <p className="text-sm leading-snug mb-4" style={{ color: C.inkMuted }}>{d.overview || "Synopsis non disponible."}</p>
+                    {cast.length > 0 && (
+                      <div className="mb-4">
+                        <p className="text-xs font-mono mb-1.5" style={{ color: C.inkMuted }}>CASTING</p>
+                        <p className="text-sm" style={{ color: C.ink }}>{cast.map((c) => c.name).join(", ")}</p>
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <button onClick={() => addFavorite({ id: d.id, media_type: detailItem.media_type, title, poster_path: d.poster_path, release_date: d.release_date, first_air_date: d.first_air_date })}
+                        className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.amber, color: "#1A1305" }}>
+                        <Icon name="heart" size={16} color="#1A1305" fill="#1A1305" /> Ajouter à ma sélection
+                      </button>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
