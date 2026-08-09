@@ -12,6 +12,57 @@ export default {
     }
 
     const url = new URL(request.url);
+    const jsonHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
+
+    // État partagé "foyer" (déjà vu + sélection commune), stocké dans Cloudflare KV (env.CE_SOIR_KV).
+    // Volontairement simple : pas de compte par utilisateur, un seul pot commun pour les 2 personnes
+    // déjà authentifiées via Cloudflare Access en amont.
+    if (url.pathname.startsWith("/shared/")) {
+      try {
+        const readList = async (key) => {
+          const raw = await env.CE_SOIR_KV.get(key);
+          return raw ? JSON.parse(raw) : [];
+        };
+        const writeList = async (key, list) => env.CE_SOIR_KV.put(key, JSON.stringify(list));
+
+        if (url.pathname === "/shared/state" && request.method === "GET") {
+          const [seen, favorites] = await Promise.all([readList("seen"), readList("favorites")]);
+          return new Response(JSON.stringify({ seen, favorites }), { headers: jsonHeaders });
+        }
+
+        if (url.pathname === "/shared/seen-add" && request.method === "POST") {
+          const { key } = await request.json();
+          const seen = await readList("seen");
+          if (key && !seen.includes(key)) seen.push(key);
+          await writeList("seen", seen);
+          return new Response(JSON.stringify({ seen }), { headers: jsonHeaders });
+        }
+
+        if (url.pathname === "/shared/favorite-add" && request.method === "POST") {
+          const { item } = await request.json();
+          const favorites = await readList("favorites");
+          if (item?.key && !favorites.some((f) => f.key === item.key)) favorites.unshift(item);
+          await writeList("favorites", favorites.slice(0, 60));
+          return new Response(JSON.stringify({ favorites }), { headers: jsonHeaders });
+        }
+
+        if (url.pathname === "/shared/favorite-remove" && request.method === "POST") {
+          const { key } = await request.json();
+          const favorites = (await readList("favorites")).filter((f) => f.key !== key);
+          await writeList("favorites", favorites);
+          return new Response(JSON.stringify({ favorites }), { headers: jsonHeaders });
+        }
+
+        if (url.pathname === "/shared/reset" && request.method === "POST") {
+          await Promise.all([writeList("seen", []), writeList("favorites", [])]);
+          return new Response(JSON.stringify({ seen: [], favorites: [] }), { headers: jsonHeaders });
+        }
+
+        return new Response("Route inconnue", { status: 404 });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: "Erreur état partagé", detail: String(err) }), { status: 500, headers: jsonHeaders });
+      }
+    }
 
     // Proxy TMDB : /tmdb/<n'importe quel chemin TMDB> -> https://api.themoviedb.org/3/<chemin>
     // La clé TMDB (env.TMDB_API_KEY) est injectée ici, jamais exposée au navigateur.

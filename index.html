@@ -92,6 +92,15 @@ function tmdbUrl(path, params = {}) {
   return `${WORKER_URL}/tmdb${path}?${p.toString()}`;
 }
 async function tmdbFetch(path, params) { return fetch(tmdbUrl(path, params)).then(safeJson); }
+
+// État partagé "foyer" (déjà vu + sélection commune), stocké côté Worker (Cloudflare KV).
+async function sharedFetch(path, { method = "GET", body } = {}) {
+  return fetch(`${WORKER_URL}/shared${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(safeJson);
+}
 function yearOf(item) { const d = item.release_date || item.first_air_date; return d ? d.slice(0, 4) : "—"; }
 function momentOfDay() {
   const h = new Date().getHours();
@@ -130,6 +139,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     chevronLeft: <path d="M15 18l-6-6 6-6"/>,
     layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
     download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></>,
+    home: <><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -188,7 +198,9 @@ function CeSoir() {
 
   const [seenIds, setSeenIds] = useState(new Set());
   const [favorites, setFavorites] = useState([]);
+  const [sharedFavorites, setSharedFavorites] = useState([]);
   const [favDrawerOpen, setFavDrawerOpen] = useState(false);
+  const [favDrawerTab, setFavDrawerTab] = useState("perso");
 
   const [trailerOpenFor, setTrailerOpenFor] = useState(null);
   const [trailerUrl, setTrailerUrl] = useState("");
@@ -212,6 +224,21 @@ function CeSoir() {
       const favs = await storageGet("favorites");
       if (favs?.value) { try { setFavorites(JSON.parse(favs.value)); } catch {} }
       setBooted(true);
+    })();
+  }, []);
+
+  // État partagé "foyer" : déjà vu + sélection commune, stockés côté Worker (Cloudflare KV).
+  // Chargé une fois au démarrage ; fusionné avec le cache local pour un affichage instantané
+  // même hors ligne, puis remplacé par la version serveur dès qu'elle arrive.
+  useEffect(() => {
+    (async () => {
+      try {
+        const shared = await sharedFetch("/state");
+        if (Array.isArray(shared?.seen)) {
+          setSeenIds((prev) => new Set([...prev, ...shared.seen]));
+        }
+        if (Array.isArray(shared?.favorites)) setSharedFavorites(shared.favorites);
+      } catch {}
     })();
   }, []);
 
@@ -575,17 +602,33 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
   function markSeen(item) {
     const key = `${item.media_type}-${item.id}`;
     const next = new Set(seenIds); next.add(key);
-    persistSeen(next); advanceCard();
+    persistSeen(next);
+    sharedFetch("/seen-add", { method: "POST", body: { key } }).catch(() => {}); // déjà vu = partagé entre les 2
+    advanceCard();
   }
 
   function addFavorite(item) {
     const key = `${item.media_type}-${item.id}`;
     if (favorites.some((f) => f.key === key)) { advanceCard(); return; }
     const next = [{ key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) }, ...favorites].slice(0, 12);
-    persistFavorites(next); showToast("Ajouté à ta sélection ♥"); advanceCard();
+    persistFavorites(next); showToast("Ajouté à ta sélection perso ♥"); advanceCard();
   }
 
   function removeFavorite(key) { persistFavorites(favorites.filter((f) => f.key !== key)); }
+
+  function addSharedFavorite(item) {
+    const key = `${item.media_type}-${item.id}`;
+    if (sharedFavorites.some((f) => f.key === key)) { showToast("Déjà dans la sélection du foyer"); return; }
+    const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
+    setSharedFavorites((prev) => [fav, ...prev].slice(0, 24));
+    sharedFetch("/favorite-add", { method: "POST", body: { item: fav } }).catch(() => {});
+    showToast("Ajouté à la sélection du foyer 🏠");
+  }
+
+  function removeSharedFavorite(key) {
+    setSharedFavorites((prev) => prev.filter((f) => f.key !== key));
+    sharedFetch("/favorite-remove", { method: "POST", body: { key } }).catch(() => {});
+  }
 
   async function openTrailer(item) {
     if (trailerOpenFor === item.id) { setTrailerOpenFor(null); return; }
@@ -620,7 +663,13 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
     runDiscover({ genreIds: next });
   }
 
-  async function resetSeenAndFavorites() { await persistSeen(new Set()); await persistFavorites([]); showToast("Historique de choix réinitialisé"); }
+  async function resetSeenAndFavorites() {
+    await persistSeen(new Set());
+    await persistFavorites([]);
+    setSharedFavorites([]);
+    sharedFetch("/reset", { method: "POST" }).catch(() => {}); // remet aussi à zéro le déjà-vu et la sélection du foyer
+    showToast("Historique de choix réinitialisé");
+  }
 
   const current = results[currentIndex];
   const next2 = results.slice(currentIndex + 1, currentIndex + 3);
@@ -751,6 +800,7 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
             {results.map((it) => {
               const key = `${it.media_type}-${it.id}`;
               const isFav = favorites.some((f) => f.key === key);
+              const isSharedFav = sharedFavorites.some((f) => f.key === key);
               return (
                 <div key={key} className="flex items-center gap-3 py-2.5" style={{ borderBottom: `1px solid ${C.border}` }}>
                   <button onClick={() => openDetail(it)} className="shrink-0">
@@ -765,9 +815,14 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                     <div className="flex items-center gap-1 font-mono text-xs" style={{ color: C.amber }}>
                       <Icon name="star" size={11} color={C.amber} fill={C.amber} />{it.vote_average?.toFixed(1) ?? "—"}
                     </div>
-                    <button onClick={() => addFavorite(it)} aria-label="Ajouter à ma sélection" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
-                      <Icon name="heart" size={16} color={C.amber} fill={isFav ? C.amber : "none"} />
-                    </button>
+                    <div className="flex items-center gap-0.5">
+                      <button onClick={() => addFavorite(it)} aria-label="Ajouter à ma sélection perso" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
+                        <Icon name="heart" size={16} color={C.amber} fill={isFav ? C.amber : "none"} />
+                      </button>
+                      <button onClick={() => addSharedFavorite(it)} aria-label="Ajouter à la sélection du foyer" className="p-1.5 rounded-full" style={{ background: isSharedFav ? "#16302E" : "transparent" }}>
+                        <Icon name="home" size={16} color={C.teal} fill={isSharedFav ? C.teal : "none"} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -812,8 +867,11 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                   <button onClick={() => openTrailer(current)} className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
                     <Icon name="play" size={15} color={C.ink} fill={C.ink} /> Bande-annonce
                   </button>
-                  <button onClick={() => addFavorite(current)} className="p-3 rounded-full" style={{ background: "#2A2A18", border: `1px solid ${C.border}` }} aria-label="Ajouter à ma sélection">
+                  <button onClick={() => addFavorite(current)} className="p-3 rounded-full" style={{ background: "#2A2A18", border: `1px solid ${C.border}` }} aria-label="Ajouter à ma sélection perso">
                     <Icon name="heart" size={18} color={C.amber} />
+                  </button>
+                  <button onClick={() => addSharedFavorite(current)} className="p-3 rounded-full" style={{ background: "#16302E", border: `1px solid ${C.border}` }} aria-label="Ajouter à la sélection du foyer">
+                    <Icon name="home" size={18} color={C.teal} />
                   </button>
                 </div>
               </div>
@@ -837,21 +895,50 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
       <div className="fixed left-0 right-0 bottom-0 rounded-t-2xl card-transition"
         style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, transform: favDrawerOpen ? "translateY(0)" : "translateY(calc(100% - 52px))", maxHeight: "70vh" }}>
         <button onClick={() => setFavDrawerOpen((o) => !o)} className="w-full flex items-center justify-between px-5 py-3.5">
-          <span className="text-sm font-medium">Ma sélection ce soir ({favorites.length})</span>
+          <span className="text-sm font-medium">Sélection · perso {favorites.length} · foyer {sharedFavorites.length}</span>
           <Icon name={favDrawerOpen ? "chevronDown" : "chevronUp"} size={18} color={C.inkMuted} />
         </button>
-        <div className="px-5 pb-6 overflow-y-auto" style={{ maxHeight: "55vh" }}>
-          {favorites.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>Glisse une carte vers la droite (ou ♥) pour la garder ici.</p>}
-          {favorites.map((f) => (
-            <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
-              <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm truncate">{f.title}</p>
-                <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year} · {f.media_type === "movie" ? "Film" : "Série"}</p>
-              </div>
-              <button onClick={() => removeFavorite(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
-            </div>
-          ))}
+        <div className="px-5 flex gap-2 mb-2">
+          <button onClick={() => setFavDrawerTab("perso")} className="flex-1 rounded-full py-1.5 text-xs font-medium flex items-center justify-center gap-1.5"
+            style={{ background: favDrawerTab === "perso" ? C.amber : C.bg, color: favDrawerTab === "perso" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+            <Icon name="heart" size={13} color={favDrawerTab === "perso" ? "#1A1305" : C.amber} fill={favDrawerTab === "perso" ? "#1A1305" : "none"} /> Perso ({favorites.length})
+          </button>
+          <button onClick={() => setFavDrawerTab("foyer")} className="flex-1 rounded-full py-1.5 text-xs font-medium flex items-center justify-center gap-1.5"
+            style={{ background: favDrawerTab === "foyer" ? C.teal : C.bg, color: favDrawerTab === "foyer" ? "#0A1614" : C.ink, border: `1px solid ${C.border}` }}>
+            <Icon name="home" size={13} color={favDrawerTab === "foyer" ? "#0A1614" : C.teal} fill={favDrawerTab === "foyer" ? "#0A1614" : "none"} /> Foyer ({sharedFavorites.length})
+          </button>
+        </div>
+        <div className="px-5 pb-6 overflow-y-auto" style={{ maxHeight: "50vh" }}>
+          {favDrawerTab === "perso" && (
+            <>
+              {favorites.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>Glisse une carte vers la droite (ou ♥) pour la garder ici — visible sur cet appareil seulement.</p>}
+              {favorites.map((f) => (
+                <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm truncate">{f.title}</p>
+                    <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year} · {f.media_type === "movie" ? "Film" : "Série"}</p>
+                  </div>
+                  <button onClick={() => removeFavorite(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
+                </div>
+              ))}
+            </>
+          )}
+          {favDrawerTab === "foyer" && (
+            <>
+              {sharedFavorites.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>Ajoutez des titres à la sélection du foyer (icône maison) — visible par vous deux.</p>}
+              {sharedFavorites.map((f) => (
+                <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm truncate">{f.title}</p>
+                    <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year} · {f.media_type === "movie" ? "Film" : "Série"}</p>
+                  </div>
+                  <button onClick={() => removeSharedFavorite(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
 
@@ -1048,7 +1135,11 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                     <div className="flex gap-2">
                       <button onClick={() => addFavorite({ id: d.id, media_type: detailItem.media_type, title, poster_path: d.poster_path, release_date: d.release_date, first_air_date: d.first_air_date })}
                         className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.amber, color: "#1A1305" }}>
-                        <Icon name="heart" size={16} color="#1A1305" fill="#1A1305" /> Ajouter à ma sélection
+                        <Icon name="heart" size={16} color="#1A1305" fill="#1A1305" /> Perso
+                      </button>
+                      <button onClick={() => addSharedFavorite({ id: d.id, media_type: detailItem.media_type, title, poster_path: d.poster_path, release_date: d.release_date, first_air_date: d.first_air_date })}
+                        className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.teal, color: "#0A1614" }}>
+                        <Icon name="home" size={16} color="#0A1614" fill="#0A1614" /> Foyer
                       </button>
                     </div>
                   </div>
