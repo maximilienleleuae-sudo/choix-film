@@ -140,6 +140,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
     download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></>,
     home: <><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>,
+    eyeOff: <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a17.5 17.5 0 0 1-2.16 3.19M6.61 6.61C3.9 8.36 2 12 2 12s3 8 10 8a9.27 9.27 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -599,13 +600,17 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
 
   function advanceCard() { setDragX(0); setCurrentIndex((i) => i + 1); setTrailerOpenFor(null); }
 
-  function markSeen(item) {
+  function recordSeen(item) {
     const key = `${item.media_type}-${item.id}`;
     const next = new Set(seenIds); next.add(key);
     persistSeen(next);
     sharedFetch("/seen-add", { method: "POST", body: { key } }).catch(() => {}); // déjà vu = partagé entre les 2
-    advanceCard();
+    return key;
   }
+
+  function markSeen(item) { recordSeen(item); advanceCard(); }
+
+  function markSeenElsewhere(item) { recordSeen(item); showToast("Marqué comme déjà vu"); }
 
   function addFavorite(item) {
     const key = `${item.media_type}-${item.id}`;
@@ -816,6 +821,9 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                       <Icon name="star" size={11} color={C.amber} fill={C.amber} />{it.vote_average?.toFixed(1) ?? "—"}
                     </div>
                     <div className="flex items-center gap-0.5">
+                      <button onClick={() => markSeenElsewhere(it)} aria-label="Marquer comme déjà vu" className="p-1.5 rounded-full">
+                        <Icon name="eyeOff" size={16} color={C.inkMuted} />
+                      </button>
                       <button onClick={() => addFavorite(it)} aria-label="Ajouter à ma sélection perso" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
                         <Icon name="heart" size={16} color={C.amber} fill={isFav ? C.amber : "none"} />
                       </button>
@@ -1133,6 +1141,10 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                       </div>
                     )}
                     <div className="flex gap-2">
+                      <button onClick={() => markSeenElsewhere({ id: d.id, media_type: detailItem.media_type })}
+                        className="p-3 rounded-full" style={{ background: "#2A2130", border: `1px solid ${C.border}` }} aria-label="Marquer comme déjà vu">
+                        <Icon name="eyeOff" size={18} color={C.inkMuted} />
+                      </button>
                       <button onClick={() => addFavorite({ id: d.id, media_type: detailItem.media_type, title, poster_path: d.poster_path, release_date: d.release_date, first_air_date: d.first_air_date })}
                         className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.amber, color: "#1A1305" }}>
                         <Icon name="heart" size={16} color="#1A1305" fill="#1A1305" /> Perso
