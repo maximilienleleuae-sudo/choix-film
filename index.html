@@ -62,6 +62,16 @@ const MOVIE_GENRE_NAMES_FR = [
   "Science-Fiction", "Téléfilm", "Thriller", "Guerre", "Western",
 ];
 
+const COUNTRIES_FR = [
+  ["FR", "France"], ["US", "États-Unis"], ["GB", "Royaume-Uni"], ["KR", "Corée du Sud"],
+  ["JP", "Japon"], ["ES", "Espagne"], ["IT", "Italie"], ["DE", "Allemagne"], ["CA", "Canada"],
+  ["BE", "Belgique"], ["IN", "Inde"], ["CN", "Chine"], ["MX", "Mexique"], ["BR", "Brésil"],
+  ["SE", "Suède"], ["DK", "Danemark"], ["NL", "Pays-Bas"], ["AU", "Australie"],
+];
+
+const CURRENT_YEAR = new Date().getFullYear();
+const YEAR_OPTIONS = Array.from({ length: CURRENT_YEAR - 1959 }, (_, i) => CURRENT_YEAR - i);
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='#1B1E2B'/><text x='200' y='300' fill='#8B8A99' font-family='sans-serif' font-size='20' text-anchor='middle'>Pas d'affiche</text></svg>`
 );
@@ -167,6 +177,8 @@ function CeSoir() {
   const [genresLoaded, setGenresLoaded] = useState(false);
   const [providers, setProviders] = useState([]); // plateformes de streaming (France) via TMDB watch providers
   const [activeProviderId, setActiveProviderId] = useState(null);
+  const [activeYear, setActiveYear] = useState(null);
+  const [activeCountry, setActiveCountry] = useState(null);
 
   const [tasteProfile, setTasteProfile] = useState(null);
   const [csvStatus, setCsvStatus] = useState("");
@@ -559,12 +571,12 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), providerId = activeProviderId, yearFrom, yearTo, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), providerId = activeProviderId, originCountry = activeCountry, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
     setResultsSource("discover");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, yearFrom, yearTo };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, originCountry, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
@@ -574,6 +586,7 @@ function CeSoir() {
       if (castIds.length) params.with_cast = castIds.join(",");
       if (keywordIds.length) params.with_keywords = keywordIds.join(",");
       if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
+      if (originCountry) params.with_origin_country = originCountry;
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
@@ -594,7 +607,7 @@ function CeSoir() {
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId, activeYear, activeCountry]);
 
   // Recherche "classique" : recherche TMDB par titre (/search), sans interprétation IA — pour
   // retrouver un titre précis quand on sait déjà ce qu'on cherche plutôt que décrire une envie.
@@ -605,10 +618,13 @@ function CeSoir() {
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); setMoodError(""); }
     try {
       const kind = mediaType === "movie" ? "movie" : "tv";
-      const data = await tmdbFetch(`/search/${kind}`, { query, page: String(page) });
+      const searchParams = { query, page: String(page) };
+      if (activeYear) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(activeYear);
+      const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      const items = (data.results || []).map((it) => ({ ...it, media_type: mediaType }))
+      let items = (data.results || []).map((it) => ({ ...it, media_type: mediaType }))
         .filter((it) => !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
+      if (activeCountry) items = items.filter((it) => (it.origin_country || []).includes(activeCountry));
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -742,7 +758,8 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
 
       const activeGenreNames = activeGenreIds.map((id) => genreIdToName[id]).filter(Boolean);
       const activeProviderName = providers.find((p) => p.provider_id === activeProviderId)?.provider_name;
-      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || !!activeProviderId;
+      const activeCountryName = COUNTRIES_FR.find(([code]) => code === activeCountry)?.[1];
+      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || !!activeProviderId || !!activeYear || !!activeCountry;
       const wantsDiscovery = Math.random() < 1 / 3;
       const recentGenres = [...new Set(lastSurpriseGenresRef.current.flat())];
 
@@ -752,7 +769,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises m
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
 
 ${hasActiveFilter
-  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste période/casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}.`
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}.`
   : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
 ${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
 ${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
@@ -789,8 +806,8 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
         minVote: hasActiveFilter && minRating ? minRating : (parsed.min_rating || 6.5),
         sort: parsed.sort || "popularity.desc",
         castIds,
-        yearFrom: parsed.year_from,
-        yearTo: parsed.year_to,
+        yearFrom: activeYear || parsed.year_from,
+        yearTo: activeYear || parsed.year_to,
       });
     } catch (e) {
       setResultsError("Je n'ai pas réussi à te surprendre — vérifie l'URL du Worker ou réessaie.");
@@ -1031,6 +1048,16 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
             {providers.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.provider_name}</option>)}
           </select>
         )}
+        <select value={activeYear ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYear(v); runDiscover({ yearFrom: v || undefined, yearTo: v || undefined }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYear ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYear ? "#1A1305" : C.ink }}>
+          <option value="">Année : Toutes</option>
+          {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <select value={activeCountry ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCountry(v); runDiscover({ originCountry: v }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCountry ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCountry ? "#1A1305" : C.ink }}>
+          <option value="">Pays : Tous</option>
+          {COUNTRIES_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+        </select>
         <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
             <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
