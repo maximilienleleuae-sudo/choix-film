@@ -197,6 +197,11 @@ function CeSoir() {
 
   const [results, setResults] = useState([]);
   const [resultsLoading, setResultsLoading] = useState(false);
+  const [resultsLoadingMore, setResultsLoadingMore] = useState(false);
+  const [resultsPage, setResultsPage] = useState(1);
+  const [resultsHasMore, setResultsHasMore] = useState(false);
+  const lastDiscoverParamsRef = useRef({});
+  const loadMoreSentinelRef = useRef(null);
   const [resultsError, setResultsError] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [resultsView, setResultsView] = useState("grid");
@@ -523,9 +528,11 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1 } = {}) => {
-    setResultsLoading(true);
-    setResultsError("");
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1, append = false } = {}) => {
+    if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
+    // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
+    // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
@@ -542,12 +549,37 @@ function CeSoir() {
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
       const items = (data.results || []).map((it) => ({ ...it, media_type: type }))
         .filter((it) => !seenIds.has(`${type}-${it.id}`) && !dislikedKeys.has(`${type}-${it.id}`));
-      setResults(items);
-      setCurrentIndex(0);
-      if (!items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
-    } catch { setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
-    setResultsLoading(false);
+
+      setResultsPage(page);
+      setResultsHasMore(page < (data.total_pages || 1));
+      setResults((prev) => {
+        if (!append) return items;
+        const already = new Set(prev.map((p) => `${p.media_type}-${p.id}`));
+        return [...prev, ...items.filter((it) => !already.has(`${it.media_type}-${it.id}`))];
+      });
+      if (!append) setCurrentIndex(0);
+      if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
+    } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
+    if (append) setResultsLoadingMore(false); else setResultsLoading(false);
   }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId]);
+
+  function loadMoreResults() {
+    if (resultsLoading || resultsLoadingMore || !resultsHasMore) return;
+    runDiscover({ ...lastDiscoverParamsRef.current, page: resultsPage + 1, append: true });
+  }
+
+  // Scroll infini : observe une sentinelle en bas des vues grille/liste et charge la page
+  // suivante quand elle devient visible.
+  useEffect(() => {
+    if (resultsView !== "grid" && resultsView !== "list") return;
+    const el = loadMoreSentinelRef.current;
+    if (!el || !resultsHasMore) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) loadMoreResults();
+    }, { rootMargin: "400px" });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [resultsView, resultsHasMore, resultsLoadingMore, resultsPage, results.length]);
 
   // Résout une seule fois l'id du mot-clé TMDB "lgbt" pour le filtre thématique de la home.
   useEffect(() => {
@@ -994,6 +1026,13 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {!resultsLoading && (resultsView === "grid" || resultsView === "list") && results.length > 0 && (
+          <div ref={loadMoreSentinelRef} className="w-full flex items-center justify-center py-6">
+            {resultsLoadingMore && <Icon name="loader" color={C.amber} size={20} />}
+            {!resultsLoadingMore && !resultsHasMore && <p className="text-xs" style={{ color: C.inkMuted }}>Fin des résultats pour ces critères.</p>}
           </div>
         )}
 
