@@ -104,6 +104,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     grid: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
     list: <><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></>,
     chevronLeft: <path d="M15 18l-6-6 6-6"/>,
+    layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -152,7 +153,7 @@ function CeSoir() {
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [resultsView, setResultsView] = useState("swipe");
+  const [resultsView, setResultsView] = useState("grid");
 
   const [detailItem, setDetailItem] = useState(null);
   const [detailData, setDetailData] = useState(null);
@@ -420,7 +421,9 @@ function CeSoir() {
     setResultsError("");
     try {
       const params = new URLSearchParams({ api_key: tmdbKey, language: "fr-FR", sort_by: sort, "vote_count.gte": "30", page: String(page) });
-      if (genreIds.length) params.set("with_genres", genreIds.join(","));
+      // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
+      // la fois), ce qui ne renvoie quasiment jamais de résultat dès qu'on combine plusieurs genres.
+      if (genreIds.length) params.set("with_genres", genreIds.join("|"));
       if (minVote) params.set("vote_average.gte", String(minVote));
       if (castIds.length) params.set("with_cast", castIds.join(","));
       if (keywordIds.length) params.set("with_keywords", keywordIds.join(","));
@@ -637,13 +640,17 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
           <option value="vote_average.desc">Tri : Note</option>
           <option value="primary_release_date.desc">Tri : Année</option>
         </select>
-        <button onClick={() => setResultsView((v) => (v === "swipe" ? "grid" : "swipe"))} className="shrink-0 rounded-full p-2" aria-label="Changer d'affichage"
-          style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
-          <Icon name={resultsView === "swipe" ? "grid" : "list"} size={14} color={C.inkMuted} />
-        </button>
+        <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+          {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
+            <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
+              style={{ background: resultsView === v ? C.amber : "transparent" }}>
+              <Icon name={icon} size={13} color={resultsView === v ? "#1A1305" : C.inkMuted} />
+            </button>
+          ))}
+        </div>
       </div>
 
-      <main className={`flex-1 px-5 py-6 relative ${resultsView === "grid" && results.length ? "" : "flex flex-col items-center justify-center"}`} style={{ minHeight: 460 }}>
+      <main className={`flex-1 px-5 py-6 relative ${(resultsView === "grid" || resultsView === "list") && results.length ? "" : "flex flex-col items-center justify-center"}`} style={{ minHeight: 460 }}>
         {resultsLoading && <div className="flex justify-center"><Icon name="loader" color={C.amber} size={26} /></div>}
         {!resultsLoading && resultsError && <p className="text-sm text-center px-6" style={{ color: C.inkMuted }}>{resultsError}</p>}
         {!resultsLoading && !results.length && !resultsError && (
@@ -667,6 +674,35 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
                 <p className="font-mono text-[10px]" style={{ color: C.inkMuted }}>{yearOf(it)}</p>
               </button>
             ))}
+          </div>
+        )}
+
+        {!resultsLoading && resultsView === "list" && results.length > 0 && (
+          <div className="w-full flex flex-col">
+            {results.map((it) => {
+              const key = `${it.media_type}-${it.id}`;
+              const isFav = favorites.some((f) => f.key === key);
+              return (
+                <div key={key} className="flex items-center gap-3 py-2.5" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <button onClick={() => openDetail(it)} className="shrink-0">
+                    <img src={it.poster_path ? `https://image.tmdb.org/t/p/w154${it.poster_path}` : FALLBACK_POSTER} alt="" className="w-11 h-16 object-cover rounded" style={{ background: C.bgCard }} />
+                  </button>
+                  <button onClick={() => openDetail(it)} className="flex-1 min-w-0 text-left">
+                    <p className="text-sm truncate">{titleOf(it)}</p>
+                    <p className="font-mono text-[11px] mb-1" style={{ color: C.inkMuted }}>{yearOf(it)} · {it.media_type === "movie" ? "Film" : "Série"}</p>
+                    <p className="text-xs" style={{ color: C.inkMuted, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{it.overview || "Synopsis non disponible."}</p>
+                  </button>
+                  <div className="flex flex-col items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1 font-mono text-xs" style={{ color: C.amber }}>
+                      <Icon name="star" size={11} color={C.amber} fill={C.amber} />{it.vote_average?.toFixed(1) ?? "—"}
+                    </div>
+                    <button onClick={() => addFavorite(it)} aria-label="Ajouter à ma sélection" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
+                      <Icon name="heart" size={16} color={C.amber} fill={isFav ? C.amber : "none"} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
