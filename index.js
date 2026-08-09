@@ -26,8 +26,10 @@ export default {
         const writeList = async (key, list) => env.CE_SOIR_KV.put(key, JSON.stringify(list));
 
         if (url.pathname === "/shared/state" && request.method === "GET") {
-          const [seen, favorites] = await Promise.all([readList("seen"), readList("favorites")]);
-          return new Response(JSON.stringify({ seen, favorites }), { headers: jsonHeaders });
+          const [seen, favorites, likes, dislikes] = await Promise.all([
+            readList("seen"), readList("favorites"), readList("likes"), readList("dislikes"),
+          ]);
+          return new Response(JSON.stringify({ seen, favorites, likes, dislikes }), { headers: jsonHeaders });
         }
 
         if (url.pathname === "/shared/seen-add" && request.method === "POST") {
@@ -38,24 +40,28 @@ export default {
           return new Response(JSON.stringify({ seen }), { headers: jsonHeaders });
         }
 
-        if (url.pathname === "/shared/favorite-add" && request.method === "POST") {
-          const { item } = await request.json();
-          const favorites = await readList("favorites");
-          if (item?.key && !favorites.some((f) => f.key === item.key)) favorites.unshift(item);
-          await writeList("favorites", favorites.slice(0, 60));
-          return new Response(JSON.stringify({ favorites }), { headers: jsonHeaders });
-        }
-
-        if (url.pathname === "/shared/favorite-remove" && request.method === "POST") {
-          const { key } = await request.json();
-          const favorites = (await readList("favorites")).filter((f) => f.key !== key);
-          await writeList("favorites", favorites);
-          return new Response(JSON.stringify({ favorites }), { headers: jsonHeaders });
+        // Listes d'objets (titre/poster/genres) partagées : favorites (sélection), likes (j'aime),
+        // dislikes (j'aime pas). Même schéma d'endpoints <nom>-add / <nom>-remove pour les 3.
+        const itemLists = { favorite: "favorites", like: "likes", dislike: "dislikes" };
+        for (const [prefix, storeKey] of Object.entries(itemLists)) {
+          if (url.pathname === `/shared/${prefix}-add` && request.method === "POST") {
+            const { item } = await request.json();
+            const list = await readList(storeKey);
+            if (item?.key && !list.some((f) => f.key === item.key)) list.unshift(item);
+            await writeList(storeKey, list.slice(0, 60));
+            return new Response(JSON.stringify({ [storeKey]: list }), { headers: jsonHeaders });
+          }
+          if (url.pathname === `/shared/${prefix}-remove` && request.method === "POST") {
+            const { key } = await request.json();
+            const list = (await readList(storeKey)).filter((f) => f.key !== key);
+            await writeList(storeKey, list);
+            return new Response(JSON.stringify({ [storeKey]: list }), { headers: jsonHeaders });
+          }
         }
 
         if (url.pathname === "/shared/reset" && request.method === "POST") {
-          await Promise.all([writeList("seen", []), writeList("favorites", [])]);
-          return new Response(JSON.stringify({ seen: [], favorites: [] }), { headers: jsonHeaders });
+          await Promise.all([writeList("seen", []), writeList("favorites", []), writeList("likes", []), writeList("dislikes", [])]);
+          return new Response(JSON.stringify({ seen: [], favorites: [], likes: [], dislikes: [] }), { headers: jsonHeaders });
         }
 
         return new Response("Route inconnue", { status: 404 });
