@@ -392,7 +392,7 @@ function CeSoir() {
   // drawer Historique, et jamais deux fois pour le même titre (cache localStorage persistant).
   useEffect(() => {
     if (!historyOpen) return;
-    const toFetch = textYearFilteredHistory.slice(0, 60).filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title));
+    const toFetch = textYearFilteredHistory.filter((g) => !historyPosters[g.title] && !fetchingPostersRef.current.has(g.title)).slice(0, 60);
     if (!toFetch.length) return;
     let cancelled = false;
     (async () => {
