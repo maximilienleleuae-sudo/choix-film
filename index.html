@@ -4,6 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Ce soir</title>
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#10121A" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-180.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Ce soir" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
@@ -121,6 +129,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     list: <><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></>,
     chevronLeft: <path d="M15 18l-6-6 6-6"/>,
     layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
+    download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -131,6 +140,10 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
 function CeSoir() {
   const [booted, setBooted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const [pwaEvent, setPwaEvent] = useState(null);
+  const [showInstallBanner, setShowInstallBanner] = useState(false);
+  const [isIosDevice, setIsIosDevice] = useState(false);
 
   const [genreMap, setGenreMap] = useState({});
   const [genresLoaded, setGenresLoaded] = useState(false);
@@ -201,6 +214,40 @@ function CeSoir() {
       setBooted(true);
     })();
   }, []);
+
+  // Installation PWA : capture l'invite native (Android/desktop Chrome) pour l'afficher via
+  // notre propre bandeau, et détecte iOS (Safari ne déclenche jamais beforeinstallprompt).
+  useEffect(() => {
+    const isStandalone = window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (isStandalone) return;
+    (async () => {
+      const dismissed = await storageGet("pwa-install-dismissed");
+      if (dismissed?.value) return;
+      const ua = window.navigator.userAgent || "";
+      if (/iphone|ipad|ipod/i.test(ua) && !window.MSStream) {
+        setIsIosDevice(true);
+        setShowInstallBanner(true);
+        return;
+      }
+      function onPrompt(e) { e.preventDefault(); setPwaEvent(e); setShowInstallBanner(true); }
+      function onInstalled() { setShowInstallBanner(false); setPwaEvent(null); }
+      window.addEventListener("beforeinstallprompt", onPrompt);
+      window.addEventListener("appinstalled", onInstalled);
+    })();
+  }, []);
+
+  async function installPwa() {
+    if (!pwaEvent) return;
+    pwaEvent.prompt();
+    await pwaEvent.userChoice;
+    setPwaEvent(null);
+    setShowInstallBanner(false);
+  }
+
+  async function dismissInstallBanner() {
+    setShowInstallBanner(false);
+    await storageSet("pwa-install-dismissed", "1");
+  }
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
 
@@ -600,6 +647,30 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
         </div>
       </header>
 
+      {showInstallBanner && (
+        <div className="mx-5 mt-4 rounded-xl px-4 py-3 flex items-center gap-3" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+          <div className="p-2 rounded-full shrink-0" style={{ background: `${C.amber}22` }}>
+            <Icon name="download" color={C.amber} size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium">Installer Ce soir</p>
+            <p className="text-xs" style={{ color: C.inkMuted }}>
+              {isIosDevice
+                ? <>Appuie sur <span style={{ color: C.ink }}>Partager</span> puis <span style={{ color: C.ink }}>Sur l'écran d'accueil</span>.</>
+                : "Accès rapide depuis ton écran d'accueil, comme une vraie appli."}
+            </p>
+          </div>
+          {!isIosDevice && (
+            <button onClick={installPwa} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold" style={{ background: C.amber, color: "#1A1305" }}>
+              Installer
+            </button>
+          )}
+          <button onClick={dismissInstallBanner} aria-label="Fermer" className="shrink-0 p-1.5 rounded-full" style={{ color: C.inkMuted }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
+
       <div className="px-5 pt-4">
         <div className="flex gap-2">
           <input value={moodInput} onChange={(e) => setMoodInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runMoodSearch()}
@@ -612,7 +683,7 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
         {moodError && <p className="text-xs mt-2" style={{ color: C.danger }}>{moodError}</p>}
       </div>
 
-      <div className="px-5 pt-3 flex gap-2 overflow-x-auto scrollbar-none">
+      <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
         <button onClick={() => { const t = mediaType === "movie" ? "tv" : "movie"; setMediaType(t); runDiscover({ type: t }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5" style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }}>
           <Icon name={mediaType === "movie" ? "film" : "tv"} size={13} />
@@ -998,6 +1069,14 @@ Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<CeSoir />);
+</script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
 </script>
 </body>
 </html>
