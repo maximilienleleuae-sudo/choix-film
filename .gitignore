@@ -1,0 +1,20 @@
+# Dépendances
+node_modules/
+
+# Archives / backups
+*.zip
+v[0-9]*/
+
+# Fichiers temporaires
+*.txt
+*.bat
+*.reg
+
+# Docs / prompts internes
+*.md
+prompts-*.md
+
+# Outils internes
+.claude/
+Replay/
+install/
