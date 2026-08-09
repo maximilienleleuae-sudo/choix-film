@@ -182,6 +182,7 @@ function CeSoir() {
   const fetchingPostersRef = useRef(new Set());
   const autoLoadedRef = useRef(false);
   const autoSuggestedRef = useRef(false);
+  const lastSurpriseGenresRef = useRef([]); // 2-3 derniers tirages "Surprends-moi" (noms de genres), pour éviter de se répéter
 
   const [moodInput, setMoodInput] = useState("");
   const [moodLoading, setMoodLoading] = useState(false);
@@ -629,9 +630,76 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
     setMoodLoading(false);
   }
 
+  // "Surprends-moi" : au lieu d'un tirage TMDB pondéré localement, on demande à l'IA de choisir
+  // des critères en tenant compte des goûts du foyer (j'aime / j'aime pas), des filtres déjà actifs
+  // à l'écran (prioritaires s'il y en a), du moment de la journée, et en évitant de répéter les
+  // 2-3 derniers tirages. Le "déjà vu" reste exclu des résultats affichés comme avant (runDiscover).
   async function surpriseMe() {
-    const genreIds = preferredGenreIds.length ? preferredGenreIds : activeGenreIds;
-    await runDiscover({ type: mediaType, genreIds, minVote: 6.5, sort: "popularity.desc", page: 1 + Math.floor(Math.random() * 5) });
+    setResultsLoading(true);
+    setResultsError("");
+    try {
+      const describeItems = (items) => items.slice(0, 12).map((f) => {
+        const names = (f.genreIds || []).map((id) => genreIdToName[id]).filter(Boolean);
+        return names.length ? `${f.title} (${names.join("/")})` : f.title;
+      });
+      const likedTitles = describeItems(likedItems);
+      const dislikedTitles = describeItems(dislikedItems);
+
+      const activeGenreNames = activeGenreIds.map((id) => genreIdToName[id]).filter(Boolean);
+      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive;
+      const wantsDiscovery = Math.random() < 1 / 3;
+      const recentGenres = [...new Set(lastSurpriseGenresRef.current.flat())];
+
+      const system = `Tu choisis des critères de recherche TMDB pour surprendre l'utilisateur avec une proposition de ${mediaType === "tv" ? "série" : "film"} ce soir.
+Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
+{"genres":[string],"year_from":number|null,"year_to":number|null,"cast_names":[string],"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"|"primary_release_date.desc"}
+Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
+
+${hasActiveFilter
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste période/casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}.`
+  : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
+${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
+${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
+${seenIds.size ? `${seenIds.size} titres déjà vus seront de toute façon exclus des résultats automatiquement, inutile d'y penser.` : ""}
+${recentGenres.length ? `Les derniers tirages "Surprends-moi" portaient déjà sur : ${recentGenres.join(", ")} — varie un peu si possible pour ne pas te répéter.` : ""}
+${wantsDiscovery ? "Cette fois, ose sortir un peu du registre habituel : propose un genre adjacent mais différent de ce que le foyer aime déjà, pour la découverte." : ""}
+Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/court en journée, plus libre en soirée/nuit) sans que ce soit un critère strict.`;
+
+      const res = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 500, system, messages: [{ role: "user", content: "Surprends-moi." }] }),
+      });
+      const data = await res.json();
+      const text = (data.content || []).map((b) => b.text || "").join("").replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(text);
+
+      const genreNames = hasActiveFilter && activeGenreNames.length ? activeGenreNames : (parsed.genres || []);
+      const genreIds = genreNames.map((n) => genreMap[n.toLowerCase()]?.[mediaType]).filter(Boolean);
+
+      let castIds = [];
+      if (parsed.cast_names?.length) {
+        const found = await Promise.all(parsed.cast_names.slice(0, 3).map((name) =>
+          tmdbFetch("/search/person", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
+        ));
+        castIds = found.filter(Boolean);
+      }
+
+      lastSurpriseGenresRef.current = [...lastSurpriseGenresRef.current, genreNames].slice(-3);
+
+      await runDiscover({
+        type: mediaType,
+        genreIds: genreIds.length ? genreIds : preferredGenreIds,
+        minVote: hasActiveFilter && minRating ? minRating : (parsed.min_rating || 6.5),
+        sort: parsed.sort || "popularity.desc",
+        castIds,
+        yearFrom: parsed.year_from,
+        yearTo: parsed.year_to,
+      });
+    } catch (e) {
+      setResultsError("Je n'ai pas réussi à te surprendre — vérifie l'URL du Worker ou réessaie.");
+      setResultsLoading(false);
+    }
   }
 
   async function persistSeen(next) { setSeenIds(next); await storageSet("seen-ids", JSON.stringify([...next])); }
@@ -994,9 +1062,9 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
         )}
       </main>
 
-      <button onClick={surpriseMe} className="fixed left-1/2 rounded-full px-5 py-3 text-sm font-semibold flex items-center gap-2 shadow-lg"
+      <button onClick={surpriseMe} disabled={resultsLoading} className="fixed left-1/2 rounded-full px-5 py-3 text-sm font-semibold flex items-center gap-2 shadow-lg"
         style={{ bottom: 84, transform: "translateX(-50%)", background: C.amber, color: "#1A1305" }}>
-        <Icon name="shuffle" size={16} /> Surprends-moi
+        <Icon name={resultsLoading ? "loader" : "shuffle"} size={16} /> Surprends-moi
       </button>
 
       <div className="fixed left-0 right-0 bottom-0 rounded-t-2xl card-transition"
