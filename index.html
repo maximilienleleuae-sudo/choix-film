@@ -165,6 +165,8 @@ function CeSoir() {
 
   const [genreMap, setGenreMap] = useState({});
   const [genresLoaded, setGenresLoaded] = useState(false);
+  const [providers, setProviders] = useState([]); // plateformes de streaming (France) via TMDB watch providers
+  const [activeProviderId, setActiveProviderId] = useState(null);
 
   const [tasteProfile, setTasteProfile] = useState(null);
   const [csvStatus, setCsvStatus] = useState("");
@@ -317,6 +319,27 @@ function CeSoir() {
   }, []);
 
   useEffect(() => { loadGenres(); }, [loadGenres]);
+
+  // Liste des plateformes de streaming (France) pour le badge "disponible sur" et le filtre.
+  // TMDB Watch Providers (données JustWatch) — mêmes fournisseurs pour films et séries pour
+  // simplifier le sélecteur, fusionnés et triés par popularité (display_priority).
+  useEffect(() => {
+    if (!genresLoaded || providers.length) return;
+    (async () => {
+      try {
+        const [pm, pt] = await Promise.all([
+          tmdbFetch("/watch/providers/movie", { watch_region: "FR" }),
+          tmdbFetch("/watch/providers/tv", { watch_region: "FR" }),
+        ]);
+        const byId = new Map();
+        [...(pm.results || []), ...(pt.results || [])].forEach((p) => {
+          if (!byId.has(p.provider_id)) byId.set(p.provider_id, p);
+        });
+        const list = [...byId.values()].sort((a, b) => (a.display_priority ?? 999) - (b.display_priority ?? 999)).slice(0, 20);
+        setProviders(list);
+      } catch {}
+    })();
+  }, [genresLoaded, providers.length]);
 
   // Parse un export CSV Netflix ("Title,Date"). Netflix log chaque épisode séparément au
   // format "Série: S1: Nom de l'épisode" — on sépare le nom de série (pour le regroupement
@@ -534,11 +557,11 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), providerId = activeProviderId, yearFrom, yearTo, page = 1, append = false } = {}) => {
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, yearFrom, yearTo };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
@@ -547,6 +570,7 @@ function CeSoir() {
       if (minVote) params["vote_average.gte"] = String(minVote);
       if (castIds.length) params.with_cast = castIds.join(",");
       if (keywordIds.length) params.with_keywords = keywordIds.join(",");
+      if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
@@ -567,7 +591,7 @@ function CeSoir() {
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId]);
 
   function loadMoreResults() {
     if (resultsLoading || resultsLoadingMore || !resultsHasMore) return;
@@ -614,7 +638,7 @@ function CeSoir() {
     setDetailLoading(true);
     try {
       const kind = mt === "movie" ? "movie" : "tv";
-      const data = await tmdbFetch(`/${kind}/${id}`, { append_to_response: "credits,videos" });
+      const data = await tmdbFetch(`/${kind}/${id}`, { append_to_response: "credits,videos,watch/providers" });
       setDetailData(data);
     } catch { setDetailData({ error: true }); }
     setDetailLoading(false);
@@ -684,7 +708,8 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       const dislikedTitles = describeItems(dislikedItems);
 
       const activeGenreNames = activeGenreIds.map((id) => genreIdToName[id]).filter(Boolean);
-      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive;
+      const activeProviderName = providers.find((p) => p.provider_id === activeProviderId)?.provider_name;
+      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || !!activeProviderId;
       const wantsDiscovery = Math.random() < 1 / 3;
       const recentGenres = [...new Set(lastSurpriseGenresRef.current.flat())];
 
@@ -694,7 +719,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises m
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
 
 ${hasActiveFilter
-  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste période/casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}.`
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste période/casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}.`
   : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
 ${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
 ${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
@@ -956,6 +981,13 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           <option value="vote_average.desc">Tri : Note</option>
           <option value="primary_release_date.desc">Tri : Année</option>
         </select>
+        {providers.length > 0 && (
+          <select value={activeProviderId ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveProviderId(v); runDiscover({ providerId: v }); }}
+            className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeProviderId ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeProviderId ? "#1A1305" : C.ink }}>
+            <option value="">Plateforme : Toutes</option>
+            {providers.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.provider_name}</option>)}
+          </select>
+        )}
         <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
             <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
@@ -1331,6 +1363,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               const year = (d.release_date || d.first_air_date || "").slice(0, 4);
               const trailer = d.videos?.results?.find((v) => v.site === "YouTube" && v.type === "Trailer") || d.videos?.results?.[0];
               const cast = (d.credits?.cast || []).slice(0, 5);
+              const watchProviders = d["watch/providers"]?.results?.FR?.flatrate || [];
               return (
                 <>
                   <div className="relative" style={{ aspectRatio: "16/9", background: "#000" }}>
@@ -1356,6 +1389,19 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                         {d.genres.map((g) => (
                           <span key={g.id} className="rounded-full px-2.5 py-1 text-[11px]" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>{g.name}</span>
                         ))}
+                      </div>
+                    )}
+                    {watchProviders.length > 0 && (
+                      <div className="mb-3">
+                        <p className="text-xs font-mono mb-1.5" style={{ color: C.inkMuted }}>DISPONIBLE SUR</p>
+                        <div className="flex flex-wrap gap-2">
+                          {watchProviders.map((p) => (
+                            <div key={p.provider_id} className="flex items-center gap-1.5 rounded-full pl-1 pr-2.5 py-1" style={{ background: C.bg, border: `1px solid ${C.border}` }}>
+                              <img src={`https://image.tmdb.org/t/p/w45${p.logo_path}`} alt="" className="w-5 h-5 rounded-full object-cover" />
+                              <span className="text-[11px]" style={{ color: C.ink }}>{p.provider_name}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                     <p className="text-sm leading-snug mb-4" style={{ color: C.inkMuted }}>{d.overview || "Synopsis non disponible."}</p>
