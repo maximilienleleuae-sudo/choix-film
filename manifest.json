@@ -1,6 +1,6 @@
 {
-  "name": "Ce soir",
-  "short_name": "Ce soir",
+  "name": "Quoi regarder",
+  "short_name": "Quoi regarder",
   "description": "Choisis quoi regarder ce soir — recommandations films et séries.",
   "start_url": "./",
   "scope": "./",
