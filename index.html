@@ -411,6 +411,18 @@ function CeSoir() {
     })();
   }, [genresLoaded]);
 
+  // Genres "préférés" pour les suggestions par défaut et Surprends-moi : profil de goûts calculé
+  // depuis l'historique Netflix, enrichi des genres des titres marqués "J'aime" par le foyer (signal
+  // plus frais et explicite, placé en tête). Doit être déclaré avant les effets qui l'utilisent
+  // dans leur tableau de dépendances (évalué immédiatement au rendu, contrairement au corps de l'effet).
+  const preferredGenreIds = useMemo(() => {
+    const likedGenreCounts = {};
+    likedItems.forEach((f) => (f.genreIds || []).forEach((id) => { likedGenreCounts[id] = (likedGenreCounts[id] || 0) + 1; }));
+    const likedGenreIds = Object.entries(likedGenreCounts).sort((a, b) => b[1] - a[1]).map(([id]) => Number(id));
+    const merged = [...likedGenreIds, ...(tasteProfile?.genreIds || [])];
+    return [...new Set(merged)].slice(0, 6);
+  }, [likedItems, tasteProfile]);
+
   // Suggestions par défaut à l'arrivée sur l'écran (une seule fois), pour ne pas laisser
   // l'écran vide : pioche pondérée par le profil de goûts si dispo, sinon popularité générale.
   useEffect(() => {
@@ -501,17 +513,6 @@ function CeSoir() {
     })();
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
-
-  // Genres "préférés" pour les suggestions par défaut et Surprends-moi : profil de goûts calculé
-  // depuis l'historique Netflix, enrichi des genres des titres marqués "J'aime" par le foyer (signal
-  // plus frais et explicite, placé en tête).
-  const preferredGenreIds = useMemo(() => {
-    const likedGenreCounts = {};
-    likedItems.forEach((f) => (f.genreIds || []).forEach((id) => { likedGenreCounts[id] = (likedGenreCounts[id] || 0) + 1; }));
-    const likedGenreIds = Object.entries(likedGenreCounts).sort((a, b) => b[1] - a[1]).map(([id]) => Number(id));
-    const merged = [...likedGenreIds, ...(tasteProfile?.genreIds || [])];
-    return [...new Set(merged)].slice(0, 6);
-  }, [likedItems, tasteProfile]);
 
   const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), yearFrom, yearTo, page = 1 } = {}) => {
     setResultsLoading(true);
