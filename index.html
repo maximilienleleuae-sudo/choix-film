@@ -210,7 +210,8 @@ function CeSoir() {
   const [detailData, setDetailData] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const [seenIds, setSeenIds] = useState(new Set());
+  const [seenItems, setSeenItems] = useState([]); // objets riches (titre/affiche/genres) pour l'affichage du panneau "Déjà vu"
+  const seenIds = useMemo(() => new Set(seenItems.map((f) => (typeof f === "string" ? f : f.key))), [seenItems]);
   const [favorites, setFavorites] = useState([]);
   const [sharedFavorites, setSharedFavorites] = useState([]);
   const [likedItems, setLikedItems] = useState([]);
@@ -235,8 +236,8 @@ function CeSoir() {
       if (wh?.value) { try { setWatchHistory(JSON.parse(wh.value)); } catch {} }
       const hp = await storageGet("history-posters");
       if (hp?.value) { try { setHistoryPosters(JSON.parse(hp.value)); } catch {} }
-      const seen = await storageGet("seen-ids");
-      if (seen?.value) { try { setSeenIds(new Set(JSON.parse(seen.value))); } catch {} }
+      const seen = await storageGet("seen-items-v2");
+      if (seen?.value) { try { setSeenItems(JSON.parse(seen.value)); } catch {} }
       const favs = await storageGet("favorites");
       if (favs?.value) { try { setFavorites(JSON.parse(favs.value)); } catch {} }
       setBooted(true);
@@ -251,7 +252,12 @@ function CeSoir() {
       try {
         const shared = await sharedFetch("/state");
         if (Array.isArray(shared?.seen)) {
-          setSeenIds((prev) => new Set([...prev, ...shared.seen]));
+          // Compat anciennes entrées (simples clés string, avant l'unification du format objet).
+          const normalized = shared.seen.map((s) => (typeof s === "string" ? { key: s, title: s, poster: null, id: null, media_type: null } : s));
+          setSeenItems((prev) => {
+            const known = new Set(prev.map((f) => f.key));
+            return [...prev, ...normalized.filter((f) => !known.has(f.key))];
+          });
         }
         if (Array.isArray(shared?.favorites)) setSharedFavorites(shared.favorites);
         if (Array.isArray(shared?.likes)) setLikedItems(shared.likes);
@@ -734,17 +740,23 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     }
   }
 
-  async function persistSeen(next) { setSeenIds(next); await storageSet("seen-ids", JSON.stringify([...next])); }
+  async function persistSeenItems(next) { setSeenItems(next); await storageSet("seen-items-v2", JSON.stringify(next)); }
   async function persistFavorites(next) { setFavorites(next); await storageSet("favorites", JSON.stringify(next)); }
 
   function advanceCard() { setDragX(0); setCurrentIndex((i) => i + 1); setTrailerOpenFor(null); }
 
   function recordSeen(item) {
     const key = `${item.media_type}-${item.id}`;
-    const next = new Set(seenIds); next.add(key);
-    persistSeen(next);
-    sharedFetch("/seen-add", { method: "POST", body: { key } }).catch(() => {}); // déjà vu = partagé entre les 2
+    if (seenIds.has(key)) return key;
+    const entry = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item), genreIds: genreIdsOf(item) };
+    persistSeenItems([entry, ...seenItems].slice(0, 300));
+    sharedFetch("/seen-add", { method: "POST", body: { item: entry } }).catch(() => {}); // déjà vu = partagé entre les 2
     return key;
+  }
+
+  function removeSeen(key) {
+    persistSeenItems(seenItems.filter((f) => f.key !== key));
+    sharedFetch("/seen-remove", { method: "POST", body: { key } }).catch(() => {});
   }
 
   function markSeen(item) { recordSeen(item); advanceCard(); }
@@ -843,7 +855,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
   }
 
   async function resetSeenAndFavorites() {
-    await persistSeen(new Set());
+    await persistSeenItems([]);
     await persistFavorites([]);
     setSharedFavorites([]);
     setLikedItems([]);
@@ -1106,55 +1118,48 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
         <Icon name={resultsLoading ? "loader" : "shuffle"} size={16} /> Surprends-moi
       </button>
 
-      <div className="fixed left-0 right-0 bottom-0 rounded-t-2xl card-transition"
-        style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, transform: favDrawerOpen ? "translateY(0)" : "translateY(calc(100% - 52px))", maxHeight: "70vh" }}>
-        <button onClick={() => setFavDrawerOpen((o) => !o)} className="w-full flex items-center justify-between px-5 py-3.5">
-          <span className="text-sm font-medium">Sélection · perso {favorites.length} · foyer {sharedFavorites.length}</span>
-          <Icon name={favDrawerOpen ? "chevronDown" : "chevronUp"} size={18} color={C.inkMuted} />
-        </button>
-        <div className="px-5 flex gap-2 mb-2">
-          <button onClick={() => setFavDrawerTab("perso")} className="flex-1 rounded-full py-1.5 text-xs font-medium flex items-center justify-center gap-1.5"
-            style={{ background: favDrawerTab === "perso" ? C.amber : C.bg, color: favDrawerTab === "perso" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
-            <Icon name="heart" size={13} color={favDrawerTab === "perso" ? "#1A1305" : C.amber} fill={favDrawerTab === "perso" ? "#1A1305" : "none"} /> Perso ({favorites.length})
-          </button>
-          <button onClick={() => setFavDrawerTab("foyer")} className="flex-1 rounded-full py-1.5 text-xs font-medium flex items-center justify-center gap-1.5"
-            style={{ background: favDrawerTab === "foyer" ? C.teal : C.bg, color: favDrawerTab === "foyer" ? "#0A1614" : C.ink, border: `1px solid ${C.border}` }}>
-            <Icon name="home" size={13} color={favDrawerTab === "foyer" ? "#0A1614" : C.teal} fill={favDrawerTab === "foyer" ? "#0A1614" : "none"} /> Foyer ({sharedFavorites.length})
-          </button>
-        </div>
-        <div className="px-5 pb-6 overflow-y-auto" style={{ maxHeight: "50vh" }}>
-          {favDrawerTab === "perso" && (
-            <>
-              {favorites.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>Glisse une carte vers la droite (ou ♥) pour la garder ici — visible sur cet appareil seulement.</p>}
-              {favorites.map((f) => (
+      {(() => {
+        const drawerTabs = [
+          { id: "perso", label: "Perso", icon: "heart", color: C.amber, dark: "#1A1305", items: favorites, onRemove: removeFavorite, empty: "Glisse une carte vers la droite (ou ♥) pour la garder ici — visible sur cet appareil seulement." },
+          { id: "foyer", label: "Foyer", icon: "home", color: C.teal, dark: "#0A1614", items: sharedFavorites, onRemove: removeSharedFavorite, empty: "Ajoutez des titres à la sélection du foyer (icône maison) — visible par vous deux." },
+          { id: "vu", label: "Déjà vu", icon: "eyeOff", color: C.inkMuted, dark: C.bg, items: seenItems, onRemove: removeSeen, empty: "Marque des titres comme déjà vus (icône œil barré) pour les retrouver ici." },
+          { id: "jaime", label: "J'aime", icon: "thumbsUp", color: "#5FAE6C", dark: "#0A1B0D", items: likedItems, onRemove: removeLike, empty: "Marque des titres \"j'aime\" (pouce vers le haut) pour affiner vos suggestions." },
+          { id: "jaimepas", label: "J'aime pas", icon: "thumbsDown", color: C.danger, dark: "#fff", items: dislikedItems, onRemove: removeDislike, empty: "Marque des titres \"j'aime pas\" pour qu'ils ne soient plus proposés." },
+        ];
+        const activeTab = drawerTabs.find((t) => t.id === favDrawerTab) || drawerTabs[0];
+        return (
+          <div className="fixed left-0 right-0 bottom-0 rounded-t-2xl card-transition"
+            style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, transform: favDrawerOpen ? "translateY(0)" : "translateY(calc(100% - 52px))", maxHeight: "70vh" }}>
+            <button onClick={() => setFavDrawerOpen((o) => !o)} className="w-full flex items-center justify-between px-5 py-3.5">
+              <span className="text-sm font-medium">Mes listes · {activeTab.label} ({activeTab.items.length})</span>
+              <Icon name={favDrawerOpen ? "chevronDown" : "chevronUp"} size={18} color={C.inkMuted} />
+            </button>
+            <div className="px-5 flex gap-2 mb-2 overflow-x-auto scrollbar-none">
+              {drawerTabs.map((t) => (
+                <button key={t.id} onClick={() => setFavDrawerTab(t.id)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
+                  style={{ background: favDrawerTab === t.id ? t.color : C.bg, color: favDrawerTab === t.id ? t.dark : C.ink, border: `1px solid ${C.border}` }}>
+                  <Icon name={t.icon} size={13} color={favDrawerTab === t.id ? t.dark : t.color} fill={favDrawerTab === t.id ? t.dark : "none"} /> {t.label} ({t.items.length})
+                </button>
+              ))}
+            </div>
+            <div className="px-5 pb-6 overflow-y-auto" style={{ maxHeight: "50vh" }}>
+              {activeTab.items.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>{activeTab.empty}</p>}
+              {activeTab.items.map((f) => (
                 <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" />
+                  <button className="shrink-0" onClick={() => f.id && openDetail({ id: f.id, media_type: f.media_type })} disabled={!f.id}>
+                    <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" style={{ background: C.bg }} />
+                  </button>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm truncate">{f.title}</p>
-                    <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year} · {f.media_type === "movie" ? "Film" : "Série"}</p>
+                    <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year || ""}{f.year && f.media_type ? " · " : ""}{f.media_type === "movie" ? "Film" : f.media_type === "tv" ? "Série" : ""}</p>
                   </div>
-                  <button onClick={() => removeFavorite(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
+                  <button onClick={() => activeTab.onRemove(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
                 </div>
               ))}
-            </>
-          )}
-          {favDrawerTab === "foyer" && (
-            <>
-              {sharedFavorites.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>Ajoutez des titres à la sélection du foyer (icône maison) — visible par vous deux.</p>}
-              {sharedFavorites.map((f) => (
-                <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
-                  <img src={f.poster ? `https://image.tmdb.org/t/p/w92${f.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm truncate">{f.title}</p>
-                    <p className="font-mono text-[11px]" style={{ color: C.inkMuted }}>{f.year} · {f.media_type === "movie" ? "Film" : "Série"}</p>
-                  </div>
-                  <button onClick={() => removeSharedFavorite(f.key)} aria-label="Retirer" className="p-2"><Icon name="trash" size={15} color={C.inkMuted} /></button>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {settingsOpen && (
         <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setSettingsOpen(false)}>
@@ -1371,7 +1376,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                       </button>
                     </div>
                     <div className="flex gap-2">
-                      <button onClick={() => markSeenElsewhere({ id: d.id, media_type: detailItem.media_type })}
+                      <button onClick={() => markSeenElsewhere({ id: d.id, media_type: detailItem.media_type, title, poster_path: d.poster_path, release_date: d.release_date, first_air_date: d.first_air_date, genres: d.genres })}
                         className="p-3 rounded-full" style={{ background: "#2A2130", border: `1px solid ${C.border}` }} aria-label="Marquer comme déjà vu">
                         <Icon name="eyeOff" size={18} color={C.inkMuted} />
                       </button>

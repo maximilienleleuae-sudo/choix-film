@@ -32,28 +32,25 @@ export default {
           return new Response(JSON.stringify({ seen, favorites, likes, dislikes }), { headers: jsonHeaders });
         }
 
-        if (url.pathname === "/shared/seen-add" && request.method === "POST") {
-          const { key } = await request.json();
-          const seen = await readList("seen");
-          if (key && !seen.includes(key)) seen.push(key);
-          await writeList("seen", seen);
-          return new Response(JSON.stringify({ seen }), { headers: jsonHeaders });
-        }
-
-        // Listes d'objets (titre/poster/genres) partagées : favorites (sélection), likes (j'aime),
-        // dislikes (j'aime pas). Même schéma d'endpoints <nom>-add / <nom>-remove pour les 3.
-        const itemLists = { favorite: "favorites", like: "likes", dislike: "dislikes" };
+        // Listes d'objets (titre/poster/genres) partagées : seen (déjà vu), favorites (sélection),
+        // likes (j'aime), dislikes (j'aime pas). Même schéma d'endpoints <nom>-add / <nom>-remove
+        // pour les 4 — "seen" stockait auparavant juste des clés (string) ; les anciennes entrées
+        // de ce format sont tolérées en lecture (readList ne les modifie pas, le front les affiche
+        // en dégradé faute de titre/affiche).
+        const itemLists = { seen: "seen", favorite: "favorites", like: "likes", dislike: "dislikes" };
         for (const [prefix, storeKey] of Object.entries(itemLists)) {
           if (url.pathname === `/shared/${prefix}-add` && request.method === "POST") {
             const { item } = await request.json();
             const list = await readList(storeKey);
-            if (item?.key && !list.some((f) => f.key === item.key)) list.unshift(item);
-            await writeList(storeKey, list.slice(0, 60));
+            const key = item?.key || (typeof item === "string" ? item : null);
+            const exists = list.some((f) => (typeof f === "string" ? f : f.key) === key);
+            if (key && !exists) list.unshift(item);
+            await writeList(storeKey, list.slice(0, 300));
             return new Response(JSON.stringify({ [storeKey]: list }), { headers: jsonHeaders });
           }
           if (url.pathname === `/shared/${prefix}-remove` && request.method === "POST") {
             const { key } = await request.json();
-            const list = (await readList(storeKey)).filter((f) => f.key !== key);
+            const list = (await readList(storeKey)).filter((f) => (typeof f === "string" ? f : f.key) !== key);
             await writeList(storeKey, list);
             return new Response(JSON.stringify({ [storeKey]: list }), { headers: jsonHeaders });
           }
