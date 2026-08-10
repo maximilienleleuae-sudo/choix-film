@@ -390,6 +390,31 @@ function CeSoir() {
     await storageSet("who-am-i", email);
   }
 
+  // Sélection perso stockée côté serveur, par personne (voir /shared/perso-*) : suit Max ou
+  // Mathieu plutôt qu'un appareil précis. Au premier choix d'identité sur un appareil, si le
+  // serveur n'a encore rien pour cette personne mais qu'il existe une sélection locale (ancien
+  // système localStorage), on la migre automatiquement pour ne rien perdre.
+  useEffect(() => {
+    if (!whoAmI) return;
+    (async () => {
+      try {
+        const res = await sharedFetch(`/perso-state?email=${encodeURIComponent(whoAmI)}`);
+        let list = Array.isArray(res?.perso) ? res.perso : [];
+        if (list.length === 0) {
+          const local = await storageGet("favorites");
+          const localList = local?.value ? JSON.parse(local.value) : [];
+          if (localList.length > 0) {
+            for (const item of localList) {
+              await sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item } }).catch(() => {});
+            }
+            list = localList;
+          }
+        }
+        setFavorites(list);
+      } catch {}
+    })();
+  }, [whoAmI]);
+
   async function enablePush() {
     if (!whoAmI) { showToast("Choisis d'abord qui tu es ci-dessus"); return; }
     setPushBusy(true);
@@ -945,7 +970,6 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
   }
 
   async function persistSeenItems(next) { setSeenItems(next); await storageSet("seen-items-v2", JSON.stringify(next)); }
-  async function persistFavorites(next) { setFavorites(next); await storageSet("favorites", JSON.stringify(next)); }
 
   function advanceCard() { setDragX(0); setCurrentIndex((i) => i + 1); setTrailerOpenFor(null); }
 
@@ -968,13 +992,19 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
   function markSeenElsewhere(item) { recordSeen(item); showToast("Marqué comme déjà vu"); }
 
   function addFavorite(item) {
+    if (!whoAmI) { showToast("Choisis d'abord qui tu es dans les Réglages"); advanceCard(); return; }
     const key = `${item.media_type}-${item.id}`;
     if (favorites.some((f) => f.key === key)) { advanceCard(); return; }
-    const next = [{ key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) }, ...favorites].slice(0, 12);
-    persistFavorites(next); showToast("Ajouté à ta sélection perso ♥"); advanceCard();
+    const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
+    setFavorites((prev) => [fav, ...prev].slice(0, 12));
+    sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item: fav } }).catch(() => {});
+    showToast("Ajouté à ta sélection perso ♥"); advanceCard();
   }
 
-  function removeFavorite(key) { persistFavorites(favorites.filter((f) => f.key !== key)); }
+  function removeFavorite(key) {
+    setFavorites((prev) => prev.filter((f) => f.key !== key));
+    if (whoAmI) sharedFetch("/perso-remove", { method: "POST", body: { email: whoAmI, key } }).catch(() => {});
+  }
 
   function addSharedFavorite(item) {
     const key = `${item.media_type}-${item.id}`;
@@ -1060,11 +1090,12 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
 
   async function resetSeenAndFavorites() {
     await persistSeenItems([]);
-    await persistFavorites([]);
+    setFavorites([]);
     setSharedFavorites([]);
     setLikedItems([]);
     setDislikedItems([]);
     sharedFetch("/reset", { method: "POST" }).catch(() => {}); // remet aussi à zéro le déjà-vu, la sélection et les goûts du foyer
+    if (whoAmI) sharedFetch("/perso-reset", { method: "POST", body: { email: whoAmI } }).catch(() => {});
     showToast("Historique de choix réinitialisé");
   }
 
@@ -1351,7 +1382,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
 
       {(() => {
         const drawerTabs = [
-          { id: "perso", label: "Perso", icon: "heart", color: C.amber, dark: "#1A1305", items: favorites, onRemove: removeFavorite, empty: "Glisse une carte vers la droite (ou ♥) pour la garder ici — visible sur cet appareil seulement." },
+          { id: "perso", label: "Perso", icon: "heart", color: C.amber, dark: "#1A1305", items: favorites, onRemove: removeFavorite, empty: "Glisse une carte vers la droite (ou ♥) pour la garder ici — liée à ton identité (choisie dans les Réglages), pas à l'appareil." },
           { id: "foyer", label: "Foyer", icon: "home", color: C.teal, dark: "#0A1614", items: sharedFavorites, onRemove: removeSharedFavorite, empty: "Ajoutez des titres à la sélection du foyer (icône maison) — visible par vous deux." },
           { id: "vu", label: "Déjà vu", icon: "eyeOff", color: C.inkMuted, dark: C.bg, items: seenItems, onRemove: removeSeen, empty: "Marque des titres comme déjà vus (icône œil barré) pour les retrouver ici." },
           { id: "jaime", label: "J'aime", icon: "thumbsUp", color: "#5FAE6C", dark: "#0A1B0D", items: likedItems, onRemove: removeLike, empty: "Marque des titres \"j'aime\" (pouce vers le haut) pour affiner vos suggestions." },

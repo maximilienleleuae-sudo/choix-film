@@ -220,6 +220,41 @@ export default {
           return new Response(JSON.stringify({ ok: true }), { headers: jsonHeaders });
         }
 
+        // Sélection "perso" : une liste par personne (Max / Mathieu), séparée de la sélection
+        // foyer partagée ci-dessus. Stockée côté serveur (clé KV perso:<email>) pour suivre la
+        // personne plutôt que l'appareil — avant, c'était du localStorage, donc perdu en changeant
+        // de téléphone ou en réinstallant l'app.
+        if (url.pathname === "/shared/perso-state" && request.method === "GET") {
+          const email = url.searchParams.get("email");
+          if (!KNOWN_EMAILS.includes(email)) return new Response(JSON.stringify({ perso: [] }), { headers: jsonHeaders });
+          const list = await readList(`perso:${email}`);
+          return new Response(JSON.stringify({ perso: list }), { headers: jsonHeaders });
+        }
+        if (url.pathname === "/shared/perso-add" && request.method === "POST") {
+          const { email, item } = await request.json();
+          if (!KNOWN_EMAILS.includes(email)) return new Response(JSON.stringify({ error: "Email inconnu" }), { status: 400, headers: jsonHeaders });
+          const storeKey = `perso:${email}`;
+          const list = await readList(storeKey);
+          const key = item?.key;
+          if (key && !list.some((f) => f.key === key)) list.unshift(item);
+          await writeList(storeKey, list.slice(0, 50));
+          return new Response(JSON.stringify({ perso: list }), { headers: jsonHeaders });
+        }
+        if (url.pathname === "/shared/perso-remove" && request.method === "POST") {
+          const { email, key } = await request.json();
+          if (!KNOWN_EMAILS.includes(email)) return new Response(JSON.stringify({ error: "Email inconnu" }), { status: 400, headers: jsonHeaders });
+          const storeKey = `perso:${email}`;
+          const list = (await readList(storeKey)).filter((f) => f.key !== key);
+          await writeList(storeKey, list);
+          return new Response(JSON.stringify({ perso: list }), { headers: jsonHeaders });
+        }
+        if (url.pathname === "/shared/perso-reset" && request.method === "POST") {
+          const { email } = await request.json();
+          if (!KNOWN_EMAILS.includes(email)) return new Response(JSON.stringify({ error: "Email inconnu" }), { status: 400, headers: jsonHeaders });
+          await writeList(`perso:${email}`, []);
+          return new Response(JSON.stringify({ perso: [] }), { headers: jsonHeaders });
+        }
+
         return new Response("Route inconnue", { status: 404 });
       } catch (err) {
         return new Response(JSON.stringify({ error: "Erreur état partagé", detail: String(err) }), { status: 500, headers: jsonHeaders });
