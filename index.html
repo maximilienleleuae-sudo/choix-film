@@ -239,7 +239,7 @@ function CeSoir() {
   const lastSurpriseGenresRef = useRef([]); // 2-3 derniers tirages "Surprends-moi" (noms de genres), pour éviter de se répéter
 
   const [moodInput, setMoodInput] = useState("");
-  const [searchMode, setSearchMode] = useState("ai"); // "ai" (langage naturel) | "classic" (recherche par titre)
+  const [searchMode, setSearchMode] = useState("classic"); // "ai" (langage naturel) | "classic" (recherche par titre) — classique par défaut
   const [resultsSource, setResultsSource] = useState("discover"); // "discover" | "classic" — pour savoir quoi rejouer au scroll infini
   const [moodLoading, setMoodLoading] = useState(false);
   const [moodError, setMoodError] = useState("");
@@ -1159,13 +1159,13 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
 
       <div className="px-5 pt-4">
         <div className="flex gap-0.5 rounded-full p-0.5 mb-2 w-fit" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
-          <button onClick={() => setSearchMode("ai")} className="rounded-full px-2.5 py-1 text-[11px] font-medium flex items-center gap-1"
-            style={{ background: searchMode === "ai" ? C.amber : "transparent", color: searchMode === "ai" ? "#1A1305" : C.inkMuted }}>
-            <Icon name="sparkles" size={12} fill={searchMode === "ai" ? "#1A1305" : "none"} /> Recherche IA
-          </button>
           <button onClick={() => setSearchMode("classic")} className="rounded-full px-2.5 py-1 text-[11px] font-medium flex items-center gap-1"
             style={{ background: searchMode === "classic" ? C.amber : "transparent", color: searchMode === "classic" ? "#1A1305" : C.inkMuted }}>
             <Icon name="search" size={12} color={searchMode === "classic" ? "#1A1305" : C.inkMuted} /> Classique
+          </button>
+          <button onClick={() => setSearchMode("ai")} className="rounded-full px-2.5 py-1 text-[11px] font-medium flex items-center gap-1"
+            style={{ background: searchMode === "ai" ? C.amber : "transparent", color: searchMode === "ai" ? "#1A1305" : C.inkMuted }}>
+            <Icon name="sparkles" size={12} fill={searchMode === "ai" ? "#1A1305" : "none"} /> Recherche IA
           </button>
         </div>
         <div className="flex gap-2">
