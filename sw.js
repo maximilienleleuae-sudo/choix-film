@@ -26,3 +26,32 @@ self.addEventListener("fetch", (event) => {
     fetch(event.request).catch(() => caches.match(event.request))
   );
 });
+
+// Notifications push (voir index.js côté Worker pour l'envoi chiffré RFC 8291). Le payload est
+// un JSON simple { title, body, icon, url } — pas de contenu sensible, la notif ne fait que
+// pointer vers l'app.
+self.addEventListener("push", (event) => {
+  let data = { title: "Quoi regarder", body: "Nouvelle notification" };
+  try { if (event.data) data = { ...data, ...event.data.json() }; } catch {}
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: data.icon || "./icon-192.png",
+      badge: "./icon-192.png",
+      data: { url: data.url || "./" },
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || "./";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+    })
+  );
+});

@@ -43,6 +43,20 @@ const { useState, useEffect, useCallback, useRef, useMemo } = React;
 // ---------------------------------------------------------------------------
 const WORKER_URL = "https://royal-smoke-0062.maximilien-leleu-ae.workers.dev";
 
+// Clé publique VAPID (pas un secret : elle est faite pour être exposée au navigateur). La clé
+// privée correspondante ne vit que côté Worker. À régénérer si un jour on change de clés.
+const VAPID_PUBLIC_KEY = "BMoHQn0S48ArM-WWbqjrTfoI-o_NqkB5OoS8lm1koI9w6EvL3fg3GMowGqtfM6cz4Z1srgQdNtOXO12gQSo97zA";
+const KNOWN_PEOPLE = [
+  { email: "maxous.1984@gmail.com", name: "Max" },
+  { email: "mathieu.burkhart@gmail.com", name: "Mathieu" },
+];
+function urlBase64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(b64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
 // CSV Netflix hébergé sur le site (à côté d'index.html) — chargé automatiquement au
 // premier lancement si aucun historique n'est déjà en local. L'import manuel (Réglages)
 // reste possible et écrase ce chargement automatique.
@@ -193,6 +207,10 @@ function CeSoir() {
 
   const [pwaEvent, setPwaEvent] = useState(null);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
+
+  const [whoAmI, setWhoAmI] = useState(null); // email choisi une fois dans les Réglages
+  const [pushStatus, setPushStatus] = useState("idle"); // idle | loading | on | unsupported | denied
+  const [pushBusy, setPushBusy] = useState(false);
   const [isIosDevice, setIsIosDevice] = useState(false);
 
   const [genreMap, setGenreMap] = useState({});
@@ -339,6 +357,72 @@ function CeSoir() {
   }
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
+
+  // Notifications push : on a besoin de savoir "qui utilise cet appareil" (2 personnes fixes du
+  // foyer) pour associer l'abonnement à un email et pouvoir notifier "l'autre". Choix fait une
+  // fois dans les Réglages et mémorisé en local — pas un vrai compte, juste une étiquette.
+  useEffect(() => {
+    (async () => {
+      const who = await storageGet("who-am-i");
+      if (who?.value) setWhoAmI(who.value);
+      if (typeof Notification === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setPushStatus("unsupported");
+        return;
+      }
+      if (Notification.permission === "denied") { setPushStatus("denied"); return; }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        setPushStatus(sub ? "on" : "idle");
+      } catch { setPushStatus("idle"); }
+    })();
+  }, []);
+
+  // Ping de présence (fire-and-forget) : permet au rappel programmé du soir de ne pas relancer
+  // quelqu'un qui a déjà ouvert l'app récemment. Inoffensif si whoAmI n'est pas encore défini.
+  useEffect(() => {
+    if (!whoAmI) return;
+    sharedFetch("/ping", { method: "POST", body: { email: whoAmI } }).catch(() => {});
+  }, [whoAmI]);
+
+  async function chooseWhoAmI(email) {
+    setWhoAmI(email);
+    await storageSet("who-am-i", email);
+  }
+
+  async function enablePush() {
+    if (!whoAmI) { showToast("Choisis d'abord qui tu es ci-dessus"); return; }
+    setPushBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") { setPushStatus(permission === "denied" ? "denied" : "idle"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+      }
+      await sharedFetch("/push-subscribe", { method: "POST", body: { email: whoAmI, subscription: sub.toJSON() } });
+      setPushStatus("on");
+      showToast("Notifications activées 🔔");
+    } catch {
+      showToast("Impossible d'activer les notifications");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function disablePush() {
+    setPushBusy(true);
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+      if (whoAmI) await sharedFetch("/push-unsubscribe", { method: "POST", body: { email: whoAmI } });
+      setPushStatus("idle");
+    } catch {} finally {
+      setPushBusy(false);
+    }
+  }
 
   // Cache localStorage 24h pour les données quasi-statiques (genres, plateformes) : évite l'appel
   // réseau au démarrage la plupart du temps, donc affichage immédiat des chips/filtres sans
@@ -896,7 +980,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     if (sharedFavorites.some((f) => f.key === key)) { showToast("Déjà dans la sélection du foyer"); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
     setSharedFavorites((prev) => [fav, ...prev].slice(0, 24));
-    sharedFetch("/favorite-add", { method: "POST", body: { item: fav } }).catch(() => {});
+    sharedFetch("/favorite-add", { method: "POST", body: { item: fav, by: whoAmI } }).catch(() => {});
     showToast("Ajouté à la sélection du foyer 🏠");
   }
 
@@ -1314,6 +1398,32 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               <h3 className="font-display text-xl">Réglages</h3>
               <button onClick={() => setSettingsOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
+            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>QUI ES-TU ?</label>
+            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Sert uniquement à savoir qui notifier quand l'autre ajoute un titre à la sélection du foyer.</p>
+            <div className="flex gap-2 mb-4">
+              {KNOWN_PEOPLE.map((p) => (
+                <button key={p.email} onClick={() => chooseWhoAmI(p.email)} className="flex-1 rounded-lg py-2 text-sm font-medium"
+                  style={{ background: whoAmI === p.email ? C.amber : C.bg, color: whoAmI === p.email ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+
+            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>NOTIFICATIONS</label>
+            {pushStatus === "unsupported" && <p className="text-xs mb-4" style={{ color: C.inkMuted }}>Non supportées par ce navigateur (sur iPhone/iPad : installe l'app sur l'écran d'accueil d'abord).</p>}
+            {pushStatus === "denied" && <p className="text-xs mb-4" style={{ color: C.danger }}>Bloquées — autorise les notifications pour ce site dans les réglages du navigateur.</p>}
+            {(pushStatus === "idle" || pushStatus === "on" || pushStatus === "loading") && (
+              <>
+                <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Reçois une notif quand {whoAmI ? (KNOWN_PEOPLE.find((p) => p.email !== whoAmI)?.name || "l'autre") : "l'autre"} ajoute un titre à la sélection du foyer, et un rappel le soir.</p>
+                <button onClick={pushStatus === "on" ? disablePush : enablePush} disabled={pushBusy || !whoAmI}
+                  className="w-full text-center text-sm py-2.5 rounded-lg mb-4 flex items-center justify-center gap-2"
+                  style={{ background: pushStatus === "on" ? C.bg : C.teal, color: pushStatus === "on" ? C.ink : "#0A1614", border: `1px solid ${C.border}`, opacity: !whoAmI ? 0.5 : 1 }}>
+                  {pushBusy && <Icon name="loader" size={14} />}
+                  {pushStatus === "on" ? "Désactiver les notifications" : "Activer les notifications"}
+                </button>
+              </>
+            )}
+
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>CONNEXION TMDB</label>
             <p className="text-xs mb-1" style={{ color: C.inkMuted }}>La clé TMDB est gérée côté serveur (Worker Cloudflare) — rien à saisir ici.</p>
             {genresLoaded && <p className="text-xs mb-4" style={{ color: C.teal }}>Connectée ✓</p>}
