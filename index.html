@@ -1204,7 +1204,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               style={{ zIndex: 5, transform: `translateX(${dragX}px) rotate(${dragX / 20}deg)`, border: `1px solid ${C.border}`, cursor: dragging ? "grabbing" : "grab", touchAction: "pan-y" }}
               onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}>
               <img src={current.poster_path ? `https://image.tmdb.org/t/p/w500${current.poster_path}` : FALLBACK_POSTER} alt="" className="w-full h-full object-cover" draggable={false} />
-              <div className="absolute inset-0" style={{ background: "linear-gradient(to top, #10121Af2 5%, #10121A66 45%, transparent 70%)" }} />
+              <div className="absolute inset-0" style={{ background: "linear-gradient(to top, #10121Afa 0%, #10121Af2 32%, #10121Ab8 52%, #10121A55 68%, transparent 85%)" }} />
               <div className="absolute top-3 right-3 rounded-full px-2.5 py-1 flex items-center gap-1 font-mono text-xs" style={{ background: "#10121Ad0", border: `1px solid ${C.amberDim}` }}>
                 <Icon name="star" size={11} color={C.amber} fill={C.amber} />
                 <span style={{ color: C.amber }}>{current.vote_average?.toFixed(1) ?? "—"}</span>
