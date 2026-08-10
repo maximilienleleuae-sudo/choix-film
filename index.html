@@ -404,8 +404,9 @@ function CeSoir() {
       await sharedFetch("/push-subscribe", { method: "POST", body: { email: whoAmI, subscription: sub.toJSON() } });
       setPushStatus("on");
       showToast("Notifications activées 🔔");
-    } catch {
-      showToast("Impossible d'activer les notifications");
+    } catch (err) {
+      console.error("enablePush error:", err);
+      showToast("Erreur notifs : " + (err?.message || err?.name || String(err)));
     } finally {
       setPushBusy(false);
     }
