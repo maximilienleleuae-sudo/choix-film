@@ -411,6 +411,10 @@ function CeSoir() {
           }
         }
         setFavorites(list);
+        // Lecture à usage unique : une fois la migration éventuelle faite (ou constatée inutile),
+        // on vide l'ancienne clé locale. Sinon, si la liste serveur redevient vide plus tard (ex:
+        // tout retiré à la main), on ressusciterait à tort ces vieilles données à chaque lancement.
+        await storageSet("favorites", "");
       } catch {}
     })();
   }, [whoAmI]);
@@ -1089,6 +1093,11 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
   }
 
   async function resetSeenAndFavorites() {
+    // Ce bouton efface des données partagées côté serveur (déjà-vu, sélection foyer, j'aime,
+    // j'aime pas pour les 2 personnes, + la sélection perso de qui clique) — pas juste un cache
+    // local. Confirmation obligatoire pour éviter un clic accidentel qui efface tout pour Max ET
+    // Mathieu sans possibilité de récupération (Cloudflare KV n'a pas d'historique).
+    if (!window.confirm("Réinitialiser le déjà-vu, la sélection du foyer, les j'aime/j'aime pas et ta sélection perso ? Cette action est partagée et irréversible.")) return;
     await persistSeenItems([]);
     setFavorites([]);
     setSharedFavorites([]);
