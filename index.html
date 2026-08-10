@@ -101,7 +101,29 @@ function tmdbUrl(path, params = {}) {
   const p = new URLSearchParams({ language: "fr-FR", ...params });
   return `${WORKER_URL}/tmdb${path}?${p.toString()}`;
 }
-async function tmdbFetch(path, params) { return fetch(tmdbUrl(path, params)).then(safeJson); }
+// Cache mémoire (durée de la session) devant le Worker : évite de refaire un aller-retour réseau
+// pour un appel identique déjà fait il y a peu (ex : rouvrir la même fiche détail, revenir en
+// arrière, re-basculer Films/Séries). Le Worker a déjà son propre cache d'edge plus long ; celui-ci
+// n'est qu'une couche supplémentaire côté navigateur, sans risque de fraîcheur vu les durées courtes.
+const tmdbMemCache = new Map(); // clé: URL complète -> { data, expires }
+function tmdbCacheTtlMs(path) {
+  if (/^\/genre\//.test(path)) return 1000 * 60 * 60;
+  if (/^\/watch\/providers\//.test(path)) return 1000 * 60 * 60;
+  if (/^\/search\/keyword/.test(path)) return 1000 * 60 * 60;
+  if (/^\/search\/person/.test(path)) return 1000 * 60 * 30;
+  if (/^\/(movie|tv)\/\d+$/.test(path)) return 1000 * 60 * 15;
+  if (/^\/discover\//.test(path)) return 1000 * 60 * 2;
+  if (/^\/search\/(movie|tv|multi)/.test(path)) return 1000 * 60 * 10;
+  return 1000 * 30;
+}
+async function tmdbFetch(path, params) {
+  const url = tmdbUrl(path, params);
+  const cached = tmdbMemCache.get(url);
+  if (cached && cached.expires > Date.now()) return cached.data;
+  const data = await fetch(url).then(safeJson);
+  tmdbMemCache.set(url, { data, expires: Date.now() + tmdbCacheTtlMs(path) });
+  return data;
+}
 
 // État partagé "foyer" (déjà vu + sélection commune), stocké côté Worker (Cloudflare KV).
 async function sharedFetch(path, { method = "GET", body } = {}) {
@@ -318,8 +340,26 @@ function CeSoir() {
 
   function showToast(msg) { setToast(msg); setTimeout(() => setToast(""), 2200); }
 
+  // Cache localStorage 24h pour les données quasi-statiques (genres, plateformes) : évite l'appel
+  // réseau au démarrage la plupart du temps, donc affichage immédiat des chips/filtres sans
+  // attendre le Worker/TMDB. Rafraîchi automatiquement une fois par jour.
+  const DAY_MS = 1000 * 60 * 60 * 24;
+  async function readCachedJson(key) {
+    const raw = await storageGet(key);
+    if (!raw?.value) return null;
+    try {
+      const parsed = JSON.parse(raw.value);
+      return parsed.expires > Date.now() ? parsed.data : null;
+    } catch { return null; }
+  }
+  async function writeCachedJson(key, data, ttlMs = DAY_MS) {
+    await storageSet(key, JSON.stringify({ data, expires: Date.now() + ttlMs }));
+  }
+
   const loadGenres = useCallback(async () => {
     try {
+      const cached = await readCachedJson("genre-map-cache");
+      if (cached) { setGenreMap(cached); setGenresLoaded(true); return; }
       const [gm, gt] = await Promise.all([
         tmdbFetch("/genre/movie/list"),
         tmdbFetch("/genre/tv/list"),
@@ -329,6 +369,7 @@ function CeSoir() {
       gt.genres?.forEach((g) => { map[g.name.toLowerCase()] = { ...(map[g.name.toLowerCase()] || {}), tv: g.id }; });
       setGenreMap(map);
       setGenresLoaded(true);
+      writeCachedJson("genre-map-cache", map);
     } catch { setGenresLoaded(false); }
   }, []);
 
@@ -341,6 +382,8 @@ function CeSoir() {
     if (!genresLoaded || providers.length) return;
     (async () => {
       try {
+        const cached = await readCachedJson("providers-cache");
+        if (cached) { setProviders(cached); return; }
         const [pm, pt] = await Promise.all([
           tmdbFetch("/watch/providers/movie", { watch_region: "FR" }),
           tmdbFetch("/watch/providers/tv", { watch_region: "FR" }),
@@ -351,6 +394,7 @@ function CeSoir() {
         });
         const list = [...byId.values()].sort((a, b) => (a.display_priority ?? 999) - (b.display_priority ?? 999)).slice(0, 20);
         setProviders(list);
+        writeCachedJson("providers-cache", list);
       } catch {}
     })();
   }, [genresLoaded, providers.length]);

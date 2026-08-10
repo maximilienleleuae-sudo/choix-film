@@ -1,5 +1,21 @@
+// Durée de cache (secondes) selon le type d'appel TMDB — équilibre fraîcheur / réduction du
+// nombre de requêtes réelles à l'API TMDB. Les données quasi-statiques (genres, plateformes,
+// mots-clés, personnes) sont mises en cache longtemps ; les résultats qui varient (discover,
+// recherche) beaucoup moins, pour ne jamais donner une impression de contenu figé.
+function tmdbCacheTtl(path) {
+  if (/^\/genre\//.test(path)) return 86400 * 7;
+  if (/^\/watch\/providers\//.test(path)) return 86400 * 7;
+  if (/^\/configuration/.test(path)) return 86400 * 7;
+  if (/^\/search\/keyword/.test(path)) return 86400 * 7;
+  if (/^\/search\/person/.test(path)) return 86400;
+  if (/^\/(movie|tv)\/\d+$/.test(path)) return 3600 * 6; // détails (append_to_response inclus : credits, videos, watch/providers)
+  if (/^\/discover\//.test(path)) return 600;
+  if (/^\/search\/(movie|tv|multi)/.test(path)) return 3600;
+  return 300;
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Pré-vol CORS (nécessaire pour que le navigateur autorise l'appel depuis Cloudflare Pages)
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -79,13 +95,39 @@ export default {
         url.searchParams.forEach((v, k) => tmdbUrl.searchParams.set(k, v));
         tmdbUrl.searchParams.set("api_key", env.TMDB_API_KEY);
 
+        // Cache à l'edge Cloudflare (partagé entre les 2 comptes du foyer, par datacenter) : la clé
+        // de cache exclut la clé API TMDB pour ne jamais la persister dans un cache. On sert le
+        // cache s'il existe, sinon on interroge TMDB et on met en cache en arrière-plan (waitUntil)
+        // pour ne pas ralentir la réponse envoyée au navigateur.
+        const cache = caches.default;
+        const cacheKeyUrl = new URL(tmdbUrl.toString());
+        cacheKeyUrl.searchParams.delete("api_key");
+        const cacheKey = new Request(cacheKeyUrl.toString(), { method: "GET" });
+
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+          const res = new Response(cached.body, cached);
+          res.headers.set("Access-Control-Allow-Origin", "*");
+          res.headers.set("X-Cache", "HIT");
+          return res;
+        }
+
         const tmdbRes = await fetch(tmdbUrl.toString());
         const data = await tmdbRes.text();
+        const maxAge = tmdbCacheTtl(tmdbPath);
 
-        return new Response(data, {
+        const res = new Response(data, {
           status: tmdbRes.status,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": `public, max-age=${maxAge}`,
+            "X-Cache": "MISS",
+          },
         });
+
+        if (tmdbRes.ok && maxAge > 0) ctx.waitUntil(cache.put(cacheKey, res.clone()));
+        return res;
       } catch (err) {
         return new Response(JSON.stringify({ error: "Erreur proxy TMDB", detail: String(err) }), {
           status: 500,
