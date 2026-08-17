@@ -809,6 +809,10 @@ function CeSoir() {
       // résultat dès qu'on combine plusieurs genres.
       if (genreIds.length) items = items.filter((it) => (it.genre_ids || []).some((g) => genreIds.includes(g)));
       if (minVote) items = items.filter((it) => (it.vote_average || 0) >= minVote);
+      // Le paramètre d'année envoyé à TMDB ne filtre que la recherche par titre — la filmographie
+      // ajoutée pour une personne (acteur/réalisateur) n'en tient pas compte côté API, d'où ce
+      // post-filtrage explicite pour que l'année s'applique bien partout.
+      if (yearFrom) items = items.filter((it) => (it.release_date || it.first_air_date || "").slice(0, 4) === String(yearFrom));
 
       const sortField = sort.startsWith("vote_average") ? "vote_average" : sort.startsWith("primary_release_date") ? "date" : "popularity";
       items.sort((a, b) => {
