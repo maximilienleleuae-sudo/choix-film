@@ -769,6 +769,8 @@ function CeSoir() {
 
   // Recherche "classique" : recherche TMDB par titre (/search), sans interprétation IA — pour
   // retrouver un titre précis quand on sait déjà ce qu'on cherche plutôt que décrire une envie.
+  // En page 1, on complète aussi avec la filmographie de la personne la plus pertinente trouvée
+  // par /search/person (acteur, réalisateur…) — un seul champ sert donc pour titre ET personne.
   async function runClassicSearch({ page = 1, append = false } = {}) {
     const query = moodInput.trim();
     if (!query) return;
@@ -780,8 +782,22 @@ function CeSoir() {
       if (activeYear) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(activeYear);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      let items = (data.results || []).map((it) => ({ ...it, media_type: mediaType }))
-        .filter((it) => !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
+      let items = (data.results || []).map((it) => ({ ...it, media_type: mediaType }));
+
+      if (page === 1) {
+        try {
+          const personData = await tmdbFetch("/search/person", { query, page: "1" });
+          const person = personData.results?.[0];
+          if (person) {
+            const credits = await tmdbFetch(`/person/${person.id}/${kind === "movie" ? "movie_credits" : "tv_credits"}`);
+            const fromPerson = [...(credits.cast || []), ...(credits.crew || [])].map((it) => ({ ...it, media_type: kind }));
+            const already = new Set(items.map((it) => it.id));
+            for (const it of fromPerson) { if (!already.has(it.id)) { items.push(it); already.add(it.id); } }
+          }
+        } catch {} // la recherche par titre reste utilisable même si la recherche personne échoue
+      }
+
+      items = items.filter((it) => !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
       if (activeCountry) items = items.filter((it) => (it.origin_country || []).includes(activeCountry));
 
       setResultsPage(page);
@@ -1170,7 +1186,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
         </div>
         <div className="flex gap-2">
           <input value={moodInput} onChange={(e) => setMoodInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runSearch()}
-            placeholder={searchMode === "ai" ? "Une comédie française récente avec…" : "Rechercher un titre précis…"} className="flex-1 rounded-xl px-4 py-3 text-sm"
+            placeholder={searchMode === "ai" ? "Une comédie française récente avec…" : "Titre, acteur, réalisateur…"} className="flex-1 rounded-xl px-4 py-3 text-sm"
             style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }} />
           <button onClick={runSearch} disabled={searchMode === "ai" ? moodLoading : resultsLoading} className="rounded-xl px-4 flex items-center justify-center" style={{ background: C.amber, color: "#1A1305" }} aria-label="Chercher">
             <Icon name={(searchMode === "ai" ? moodLoading : resultsLoading) ? "loader" : (searchMode === "ai" ? "sparkles" : "search")} size={18} color="#1A1305" fill={(searchMode === "ai" && !moodLoading) ? "#1A1305" : "none"} />
