@@ -211,6 +211,9 @@ function CeSoir() {
   const [whoAmI, setWhoAmI] = useState(null); // email choisi une fois dans les Réglages
   const [pushStatus, setPushStatus] = useState("idle"); // idle | loading | on | unsupported | denied
   const [pushBusy, setPushBusy] = useState(false);
+
+  const [backupStatus, setBackupStatus] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
   const [isIosDevice, setIsIosDevice] = useState(false);
 
   const [genreMap, setGenreMap] = useState({});
@@ -1187,6 +1190,78 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     showToast("Historique de choix réinitialisé");
   }
 
+  // Sauvegarde manuelle de toutes les listes (utile en cas de bug ou avant une manip risquée type
+  // reset). Fichier JSON téléchargé localement — aucune dépendance serveur pour l'export, les
+  // données sont déjà en mémoire côté app.
+  function exportLists() {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      whoAmI,
+      perso: favorites,
+      foyer: sharedFavorites,
+      jaime: likedItems,
+      jaimepas: dislikedItems,
+      dejavu: seenItems,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `quoi-regarder-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast("Sauvegarde téléchargée");
+  }
+
+  // Réimport : fusionne toujours, ne remplace ni ne supprime jamais rien. Chaque titre est renvoyé
+  // aux mêmes routes d'ajout que l'usage normal (seen-add, like-add, dislike-add, favorite-add,
+  // perso-add), qui ignorent déjà côté serveur les clés déjà présentes — donc rejouer une
+  // sauvegarde plusieurs fois, ou sur des listes qui ont évolué depuis, ne fait qu'ajouter ce qui
+  // manque, sans jamais rien effacer.
+  async function importLists(file) {
+    setBackupBusy(true);
+    setBackupStatus("Réimport en cours…");
+    const mergeUnique = (base, incoming) => {
+      const known = new Set(base.map((f) => f.key));
+      const fresh = (incoming || []).filter((it) => it?.key && !known.has(it.key));
+      return [...base, ...fresh];
+    };
+    try {
+      const data = JSON.parse(await file.text());
+      let skippedPerso = false;
+
+      if (Array.isArray(data.dejavu) && data.dejavu.length) {
+        await persistSeenItems(mergeUnique(seenItems, data.dejavu));
+        await Promise.all(data.dejavu.map((item) => sharedFetch("/seen-add", { method: "POST", body: { item } }).catch(() => {})));
+      }
+      if (Array.isArray(data.jaime) && data.jaime.length) {
+        setLikedItems((prev) => mergeUnique(prev, data.jaime));
+        await Promise.all(data.jaime.map((item) => sharedFetch("/like-add", { method: "POST", body: { item } }).catch(() => {})));
+      }
+      if (Array.isArray(data.jaimepas) && data.jaimepas.length) {
+        setDislikedItems((prev) => mergeUnique(prev, data.jaimepas));
+        await Promise.all(data.jaimepas.map((item) => sharedFetch("/dislike-add", { method: "POST", body: { item } }).catch(() => {})));
+      }
+      if (Array.isArray(data.foyer) && data.foyer.length) {
+        setSharedFavorites((prev) => mergeUnique(prev, data.foyer));
+        await Promise.all(data.foyer.map((item) => sharedFetch("/favorite-add", { method: "POST", body: { item, by: whoAmI } }).catch(() => {})));
+      }
+      if (Array.isArray(data.perso) && data.perso.length) {
+        if (!whoAmI) { skippedPerso = true; }
+        else {
+          setFavorites((prev) => mergeUnique(prev, data.perso));
+          await Promise.all(data.perso.map((item) => sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item } }).catch(() => {})));
+        }
+      }
+
+      setBackupStatus(skippedPerso ? "Réimporté (sélection perso ignorée : choisis d'abord qui tu es)." : "Réimporté — listes complétées, rien supprimé ✓");
+      showToast("Sauvegarde réimportée");
+    } catch {
+      setBackupStatus("Fichier de sauvegarde invalide.");
+    }
+    setBackupBusy(false);
+  }
+
   const current = results[currentIndex];
   const next2 = results.slice(currentIndex + 1, currentIndex + 3);
 
@@ -1559,6 +1634,21 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
             {!csvLoading && csvStatus && <p className="text-xs mb-4" style={{ color: C.teal }}>{csvStatus}</p>}
             {!csvStatus && !csvLoading && tasteProfile && <p className="text-xs mb-1" style={{ color: C.teal }}>Profil chargé · goûts : {tasteProfile.names.slice(0, 4).join(", ") || "—"}</p>}
             {!csvStatus && !csvLoading && watchHistory.length > 0 && <p className="text-xs mb-4" style={{ color: C.inkMuted }}>{watchHistory.length} titres dans l'historique — voir l'onglet Historique (icône en haut).</p>}
+
+            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>SAUVEGARDE DE TES LISTES</label>
+            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Exporte un fichier de secours (perso, foyer, j'aime, j'aime pas, déjà vu). En cas de souci, le réimport complète toujours les listes existantes — il ne supprime ni ne remplace rien.</p>
+            <div className="flex gap-2 mb-1">
+              <button onClick={exportLists} className="flex-1 flex items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>
+                <Icon name="download" size={16} /> Exporter
+              </button>
+              <label className="flex-1 flex items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm cursor-pointer" style={{ background: C.bg, border: `1px dashed ${C.border}`, color: C.ink }}>
+                <Icon name="upload" size={16} /> Réimporter
+                <input type="file" accept=".json" className="hidden" disabled={backupBusy} onChange={(e) => { const f = e.target.files?.[0]; if (f) importLists(f); e.target.value = ""; }} />
+              </label>
+            </div>
+            {backupBusy && <p className="text-xs mb-4 flex items-center gap-1.5" style={{ color: C.inkMuted }}><Icon name="loader" size={12} color={C.inkMuted} /> {backupStatus}</p>}
+            {!backupBusy && backupStatus && <p className="text-xs mb-4" style={{ color: backupStatus.includes("invalide") ? C.danger : C.teal }}>{backupStatus}</p>}
+            {!backupStatus && <div className="mb-4" />}
 
             <button onClick={resetSeenAndFavorites} className="w-full text-center text-xs py-2.5 rounded-lg" style={{ color: C.danger, border: `1px solid ${C.border}` }}>
               Réinitialiser « déjà vu » et sélection
