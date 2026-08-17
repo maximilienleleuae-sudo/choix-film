@@ -771,18 +771,21 @@ function CeSoir() {
   // retrouver un titre précis quand on sait déjà ce qu'on cherche plutôt que décrire une envie.
   // En page 1, on complète aussi avec la filmographie de la personne la plus pertinente trouvée
   // par /search/person (acteur, réalisateur…) — un seul champ sert donc pour titre ET personne.
-  async function runClassicSearch({ page = 1, append = false } = {}) {
+  // Genre / note / tri / pays / année sont ensuite appliqués en post-filtrage côté client : l'API
+  // /search de TMDB ne les accepte pas nativement (contrairement à /discover), donc c'est la seule
+  // façon de les rendre cumulables avec une recherche par texte.
+  async function runClassicSearch({ page = 1, append = false, type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, originCountry = activeCountry, yearFrom = activeYear || undefined } = {}) {
     const query = moodInput.trim();
     if (!query) return;
     setResultsSource("classic");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); setMoodError(""); }
     try {
-      const kind = mediaType === "movie" ? "movie" : "tv";
+      const kind = type === "movie" ? "movie" : "tv";
       const searchParams = { query, page: String(page) };
-      if (activeYear) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(activeYear);
+      if (yearFrom) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      let items = (data.results || []).map((it) => ({ ...it, media_type: mediaType }));
+      let items = (data.results || []).map((it) => ({ ...it, media_type: kind }));
 
       if (page === 1) {
         try {
@@ -797,8 +800,19 @@ function CeSoir() {
         } catch {} // la recherche par titre reste utilisable même si la recherche personne échoue
       }
 
-      items = items.filter((it) => !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
-      if (activeCountry) items = items.filter((it) => (it.origin_country || []).includes(activeCountry));
+      items = items.filter((it) => !seenIds.has(`${kind}-${it.id}`) && !dislikedKeys.has(`${kind}-${it.id}`));
+      if (originCountry) items = items.filter((it) => (it.origin_country || []).includes(originCountry));
+      // OR logique (un des genres suffit), comme pour la découverte — sinon presque plus aucun
+      // résultat dès qu'on combine plusieurs genres.
+      if (genreIds.length) items = items.filter((it) => (it.genre_ids || []).some((g) => genreIds.includes(g)));
+      if (minVote) items = items.filter((it) => (it.vote_average || 0) >= minVote);
+
+      const sortField = sort.startsWith("vote_average") ? "vote_average" : sort.startsWith("primary_release_date") ? "date" : "popularity";
+      items.sort((a, b) => {
+        if (sortField === "vote_average") return (b.vote_average || 0) - (a.vote_average || 0);
+        if (sortField === "date") return (b.release_date || b.first_air_date || "").localeCompare(a.release_date || a.first_air_date || "");
+        return (b.popularity || 0) - (a.popularity || 0);
+      });
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -808,12 +822,31 @@ function CeSoir() {
         return [...prev, ...items.filter((it) => !already.has(`${it.media_type}-${it.id}`))];
       });
       if (!append) setCurrentIndex(0);
-      if (!append && !items.length) setResultsError(`Aucun résultat pour "${query}".`);
+      if (!append && !items.length) setResultsError(`Aucun résultat pour "${query}" avec ces filtres.`);
     } catch { if (!append) setResultsError("Impossible de lancer la recherche (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
   }
 
   function runSearch() { if (searchMode === "ai") runMoodSearch(); else runClassicSearch(); }
+
+  // Passerelle commune pour la barre de filtres (genres, note, tri, année, pays, plateforme,
+  // Films/Séries, LGBT+) : applique les critères à la recherche classique en cours si elle est
+  // active, sinon à la découverte du jour — pour que les filtres restent cumulables quel que soit
+  // le mode. Plateforme et thème LGBT+ reposent sur des paramètres que l'API /search de TMDB ne
+  // supporte pas (il faudrait un appel par résultat pour les vérifier un par un) : ils restent donc
+  // réservés au mode Découverte.
+  function applyFilters(overrides = {}) {
+    const inClassicSearch = resultsSource === "classic" && moodInput.trim();
+    if (inClassicSearch) {
+      if ("providerId" in overrides || "keywordIds" in overrides) {
+        showToast("Ce filtre n'est pas compatible avec une recherche par titre/acteur — utilisable en mode Découverte.");
+        return;
+      }
+      runClassicSearch(overrides);
+    } else {
+      runDiscover(overrides);
+    }
+  }
 
   // Lancée depuis un nom d'acteur/actrice cliqué dans le casting d'une fiche détail : on a déjà
   // l'id TMDB de la personne (pas besoin de re-chercher par texte), donc on va direct chercher sa
@@ -879,7 +912,7 @@ function CeSoir() {
   function toggleLgbt() {
     const next = !lgbtActive;
     setLgbtActive(next);
-    runDiscover({ keywordIds: next && lgbtKeywordId ? [lgbtKeywordId] : [] });
+    applyFilters({ keywordIds: next && lgbtKeywordId ? [lgbtKeywordId] : [] });
   }
 
   async function openDetail(item) {
@@ -1135,7 +1168,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     if (!id) return;
     const next = activeGenreIds.includes(id) ? activeGenreIds.filter((g) => g !== id) : [...activeGenreIds, id];
     setActiveGenreIds(next);
-    runDiscover({ genreIds: next });
+    applyFilters({ genreIds: next });
   }
 
   async function resetSeenAndFavorites() {
@@ -1226,12 +1259,12 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
       </div>
 
       <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
-        <button onClick={() => { setMediaType("movie"); runDiscover({ type: "movie" }); }}
+        <button onClick={() => { setMediaType("movie"); applyFilters({ type: "movie" }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "movie" ? C.amber : C.bgCard, color: mediaType === "movie" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="film" size={13} /> Films
         </button>
-        <button onClick={() => { setMediaType("tv"); runDiscover({ type: "tv" }); }}
+        <button onClick={() => { setMediaType("tv"); applyFilters({ type: "tv" }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "tv" ? C.amber : C.bgCard, color: mediaType === "tv" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="tv" size={13} /> Séries
@@ -1246,29 +1279,29 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           style={{ background: lgbtActive ? C.amber : C.bgCard, color: lgbtActive ? "#1A1305" : C.ink, border: `1px solid ${C.border}`, opacity: lgbtKeywordId ? 1 : 0.5 }}>
           🏳️‍🌈 LGBT+
         </button>
-        <button onClick={() => { const v = minRating >= 7 ? 0 : 7; setMinRating(v); runDiscover({ minVote: v }); }}
+        <button onClick={() => { const v = minRating >= 7 ? 0 : 7; setMinRating(v); applyFilters({ minVote: v }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: minRating >= 7 ? C.amber : C.bgCard, color: minRating >= 7 ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="star" size={12} fill={minRating >= 7 ? "#1A1305" : "none"} /> 7+
         </button>
-        <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); runDiscover({ sort: e.target.value }); }}
+        <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); applyFilters({ sort: e.target.value }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }}>
           <option value="popularity.desc">Tri : Popularité</option>
           <option value="vote_average.desc">Tri : Note</option>
           <option value="primary_release_date.desc">Tri : Année</option>
         </select>
         {providers.length > 0 && (
-          <select value={activeProviderId ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveProviderId(v); runDiscover({ providerId: v }); }}
+          <select value={activeProviderId ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveProviderId(v); applyFilters({ providerId: v }); }}
             className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeProviderId ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeProviderId ? "#1A1305" : C.ink }}>
             <option value="">Plateforme : Toutes</option>
             {providers.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.provider_name}</option>)}
           </select>
         )}
-        <select value={activeYear ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYear(v); runDiscover({ yearFrom: v || undefined, yearTo: v || undefined }); }}
+        <select value={activeYear ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYear(v); applyFilters({ yearFrom: v || undefined, yearTo: v || undefined }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYear ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYear ? "#1A1305" : C.ink }}>
           <option value="">Année : Toutes</option>
           {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
-        <select value={activeCountry ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCountry(v); runDiscover({ originCountry: v }); }}
+        <select value={activeCountry ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCountry(v); applyFilters({ originCountry: v }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCountry ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCountry ? "#1A1305" : C.ink }}>
           <option value="">Pays : Tous</option>
           {COUNTRIES_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
