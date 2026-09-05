@@ -106,8 +106,9 @@ const CURRENT_YEAR = new Date().getFullYear();
 const YEAR_OPTIONS = Array.from({ length: CURRENT_YEAR - 1959 }, (_, i) => CURRENT_YEAR - i);
 
 // Classification TMDB pour la France (certification_country=FR), en excluant "NR" qui ne veut
-// rien dire (non classé). Utilisée comme plafond (certification.lte) : choisir "-12" affiche
-// aussi bien les films tous publics que les -12, mais exclut -16 et -18.
+// rien dire (non classé). Correspondance exacte (certification=X) : choisir "-18" affiche les
+// films classés -18, pas "tout ce qui est en dessous" — sinon choisir le palier le plus élevé
+// reviendrait à ne quasiment rien filtrer.
 const CERTIFICATIONS_FR = [
   ["TP", "Tous publics"], ["12", "Interdit -12 ans"], ["16", "Interdit -16 ans"], ["18", "Interdit -18 ans"],
 ];
@@ -819,9 +820,9 @@ function CeSoir() {
       if (keywordIds.length) params.with_keywords = keywordIds.join("|");
       if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
       if (originCountry) params.with_origin_country = originCountry;
-      // Classification utilisée comme plafond : "certification.lte" remonte tout ce qui est classé
-      // au niveau choisi ou en dessous (ex. "-12" inclut aussi Tous publics), jamais les niveaux au-dessus.
-      if (certification) { params.certification_country = "FR"; params["certification.lte"] = certification; }
+      // Correspondance exacte : "certification" (pas ".lte") ne remonte que les films classés
+      // pile à ce niveau — un plafond rendrait le palier le plus élevé ("-18") quasi sans effet.
+      if (certification) { params.certification_country = "FR"; params.certification = certification; }
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
