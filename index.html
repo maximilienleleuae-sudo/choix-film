@@ -968,6 +968,19 @@ function CeSoir() {
           results: details.filter(Boolean).map((d) => ({ ...d, media_type: "movie" })),
           total_pages: Math.max(1, Math.ceil(all.length / PER_PAGE)),
         };
+      } else if (feed.type === "tmdb-ids") {
+        // Liste figee ("snapshot") : ids TMDB deja resolus une fois pour toutes et stockes tels
+        // quels dans flux/index.json (champ "ids") — pour une source sans flux exploitable (ex.
+        // une liste Letterboxd, qui n'a pas de RSS). Pas de mise a jour automatique : si la liste
+        // d'origine change, il faut re-resoudre les titres et remplacer le tableau a la main.
+        const PER_PAGE = 20;
+        const all = Array.isArray(feed.ids) ? feed.ids : [];
+        const slice = all.slice((page - 1) * PER_PAGE, page * PER_PAGE);
+        const details = await Promise.all(slice.map((id) => tmdbFetch(`/${media}/${id}`).catch(() => null)));
+        data = {
+          results: details.filter(Boolean).map((d) => ({ ...d, media_type: media })),
+          total_pages: Math.max(1, Math.ceil(all.length / PER_PAGE)),
+        };
       } else {
         // Les listes publiques TMDB (/list/{id}) renvoient "items" la ou le reste de l'API renvoie
         // "results" — d'ou le repli ci-dessous, qui les rend utilisables sans type dedie.

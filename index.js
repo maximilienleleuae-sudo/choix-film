@@ -339,6 +339,50 @@ export default {
       }
     }
 
+    // Outil d'appoint (usage ponctuel, pas appelé par l'app) : resout une liste de titres vers
+    // leurs id TMDB, pour construire des flux "snapshot figé" a partir de sources sans id TMDB
+    // (listes Letterboxd, SensCritique, etc.). /admin/resolve-titles?titles=A|B|C&media=movie
+    // Limite volontairement le nombre de titres par appel (sous-requetes Workers plafonnees).
+    if (url.pathname === "/admin/resolve-titles") {
+      const titles = (url.searchParams.get("titles") || "").split("|").map((t) => t.trim()).filter(Boolean);
+      const media = url.searchParams.get("media") === "tv" ? "tv" : "movie";
+      if (!titles.length) {
+        return new Response(JSON.stringify({ error: "Parametre titles manquant (separateur |)" }), { status: 400, headers: jsonHeaders });
+      }
+      if (titles.length > 40) {
+        return new Response(JSON.stringify({ error: "Maximum 40 titres par appel (limite de sous-requetes)" }), { status: 400, headers: jsonHeaders });
+      }
+      // Résolu en parallèle (Promise.all) plutôt qu'en série : un lot de 12+ titres en séquentiel
+      // dépasse le délai d'attente du client appelant avant même que le Worker ait fini.
+      const results = await Promise.all(titles.map(async (title) => {
+        try {
+          const searchUrl = new URL(`https://api.themoviedb.org/3/search/${media}`);
+          searchUrl.searchParams.set("api_key", env.TMDB_API_KEY);
+          searchUrl.searchParams.set("query", title);
+          // Coupe-circuit : une seule requête TMDB qui traine ne doit pas bloquer tout le lot
+          // (Promise.all attend le plus lent) et faire expirer l'appel côté client.
+          const r = await fetch(searchUrl, { signal: AbortSignal.timeout(6000) });
+          const data = await r.json();
+          const items = data.results || [];
+          // Correspondance exacte de titre (insensible a la casse) priorisee sur la simple popularite,
+          // qui renverrait souvent un remake ou un titre homonyme plus recent/populaire.
+          const exact = items.find((it) => (it.title || it.name || "").toLowerCase() === title.toLowerCase());
+          const best = exact || items[0] || null;
+          return {
+            query: title,
+            id: best?.id ?? null,
+            matched_title: best?.title || best?.name || null,
+            year: (best?.release_date || best?.first_air_date || "").slice(0, 4) || null,
+            exact: !!exact,
+            candidates: items.length,
+          };
+        } catch (err) {
+          return { query: title, id: null, error: String(err) };
+        }
+      }));
+      return new Response(JSON.stringify({ count: results.length, results }), { headers: jsonHeaders });
+    }
+
     // Proxy TMDB : /tmdb/<n'importe quel chemin TMDB> -> https://api.themoviedb.org/3/<chemin>
     // La clé TMDB (env.TMDB_API_KEY) est injectée ici, jamais exposée au navigateur.
     if (url.pathname.startsWith("/tmdb/")) {
