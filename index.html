@@ -1901,7 +1901,12 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                   <div className="mb-3 rounded-lg overflow-hidden" style={{ aspectRatio: "16/9", background: "#000" }}>
                     {trailerLoading && <div className="w-full h-full flex items-center justify-center"><Icon name="loader" color={C.amber} size={20} /></div>}
                     {!trailerLoading && trailerUrl && <iframe src={trailerUrl} className="w-full h-full" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen title="Bande-annonce" />}
-                    {!trailerLoading && !trailerUrl && <p className="text-xs p-3" style={{ color: C.inkMuted }}>Pas de bande-annonce trouvée.</p>}
+                    {!trailerLoading && !trailerUrl && (
+                      <a href={`https://www.google.com/search?tbm=vid&q=${encodeURIComponent(`${titleOf(current)} bande annonce`)}`} target="_blank" rel="noopener noreferrer"
+                        className="w-full h-full flex items-center justify-center gap-2 text-xs font-medium" style={{ color: C.amber }}>
+                        <Icon name="play" size={13} color={C.amber} /> Pas de bande-annonce — chercher sur Google Videos
+                      </a>
+                    )}
                   </div>
                 )}
                 <div className="flex items-center gap-2 mb-2">
@@ -2321,7 +2326,17 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                     {trailer ? (
                       <iframe src={`https://www.youtube.com/embed/${trailer.key}`} className="w-full h-full" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen title="Bande-annonce" />
                     ) : (
-                      <img src={d.backdrop_path ? `https://image.tmdb.org/t/p/w780${d.backdrop_path}` : (d.poster_path ? `https://image.tmdb.org/t/p/w500${d.poster_path}` : FALLBACK_POSTER)} alt="" className="w-full h-full object-cover" />
+                      <>
+                        <img src={d.backdrop_path ? `https://image.tmdb.org/t/p/w780${d.backdrop_path}` : (d.poster_path ? `https://image.tmdb.org/t/p/w500${d.poster_path}` : FALLBACK_POSTER)} alt="" className="w-full h-full object-cover" />
+                        {/* Pas de bande-annonce TMDB : on retombe sur une recherche Google Videos du
+                            titre plutôt que de laisser un simple visuel statique sans action. */}
+                        <a href={`https://www.google.com/search?tbm=vid&q=${encodeURIComponent(`${title} bande annonce`)}`} target="_blank" rel="noopener noreferrer"
+                          className="absolute inset-0 flex items-center justify-center gap-2" style={{ background: "#10121A70" }}>
+                          <span className="rounded-full px-4 py-2.5 flex items-center gap-2 text-sm font-medium" style={{ background: "#10121Ad0", border: `1px solid ${C.amberDim}`, color: C.ink }}>
+                            <Icon name="play" size={14} color={C.amber} /> Chercher la bande-annonce
+                          </span>
+                        </a>
+                      </>
                     )}
                   </div>
                   <div className="p-5">
