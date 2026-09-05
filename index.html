@@ -941,8 +941,25 @@ function CeSoir() {
         lastFeedRef.current = { ...feed, baseLabel, seed };
         setActiveFeed({ ...feed, baseLabel, label: `${baseLabel} ${seed.title}` });
         data = await tmdbFetch(`/${seed.media_type}/${seed.id}/recommendations`, { page: String(page) });
+      } else if (feed.type === "letterboxd") {
+        // Flux RSS d'un compte Letterboxd, normalise par le Worker (voir /feed/letterboxd/ dans
+        // index.js). La source fournit deja l'id TMDB de chaque film : il ne reste qu'a charger la
+        // fiche complete, 20 par 20, pour retomber sur exactement le meme format d'objet que les
+        // autres flux. Le cache TMDB absorbe ces appels des le second passage.
+        const PER_PAGE = 20;
+        const feedData = await fetch(`${WORKER_URL}/feed/letterboxd/${encodeURIComponent(feed.account)}`).then(safeJson);
+        const all = Array.isArray(feedData?.items) ? feedData.items : [];
+        const slice = all.slice((page - 1) * PER_PAGE, page * PER_PAGE);
+        const details = await Promise.all(slice.map((it) => tmdbFetch(`/movie/${it.tmdb_id}`).catch(() => null)));
+        data = {
+          results: details.filter(Boolean).map((d) => ({ ...d, media_type: "movie" })),
+          total_pages: Math.max(1, Math.ceil(all.length / PER_PAGE)),
+        };
       } else {
-        data = await tmdbFetch(feed.path, { ...(feed.params || {}), page: String(page) });
+        // Les listes publiques TMDB (/list/{id}) renvoient "items" la ou le reste de l'API renvoie
+        // "results" — d'ou le repli ci-dessous, qui les rend utilisables sans type dedie.
+        const raw = await tmdbFetch(feed.path, { ...(feed.params || {}), page: String(page) });
+        data = raw.results ? raw : { ...raw, results: raw.items || [] };
       }
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
       const items = (data.results || [])

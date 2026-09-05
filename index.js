@@ -261,6 +261,84 @@ export default {
       }
     }
 
+    // ---------------------------------------------------------------------------
+    // Flux Letterboxd : /feed/letterboxd/<compte>
+    //
+    // Chaque compte Letterboxd publie son activite en RSS 2.0 sur letterboxd.com/<compte>/rss/,
+    // avec un espace de noms maison : letterboxd:filmTitle, letterboxd:filmYear,
+    // letterboxd:memberLike, et surtout <tmdb:movieId> — l'identifiant TMDB fourni par la source.
+    // C'est ce qui rend ce flux exploitable sans aucune resolution par titre (donc sans risque de
+    // confondre deux films homonymes). Les items depourvus de tmdb:movieId sont des listes
+    // publiees par le compte, pas des films : on les ignore.
+    //
+    // Le runtime Workers n'a pas de DOMParser, d'ou l'extraction par expressions regulieres. C'est
+    // acceptable ici parce qu'un flux RSS est un contrat stable et regulier, contrairement au HTML
+    // d'une page. En cas d'echec cote Letterboxd, on renvoie le cache meme perime plutot que rien.
+    // ---------------------------------------------------------------------------
+    if (url.pathname.startsWith("/feed/letterboxd/")) {
+      const account = url.pathname.slice("/feed/letterboxd/".length).replace(/\/+$/, "");
+      if (!/^[A-Za-z0-9_-]{1,40}$/.test(account)) {
+        return new Response(JSON.stringify({ error: "Compte invalide" }), { status: 400, headers: jsonHeaders });
+      }
+      const cacheKey = `feed:letterboxd:${account}`;
+      const FRESH_MS = 6 * 60 * 60 * 1000;
+      let cached = null;
+      try { cached = await env.CE_SOIR_KV.get(cacheKey, "json"); } catch {}
+      if (cached && Date.now() - (cached.fetchedAt || 0) < FRESH_MS) {
+        return new Response(JSON.stringify({ ...cached, cache: "hit" }), { headers: jsonHeaders });
+      }
+
+      const decodeXml = (v) => String(v)
+        .replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/, "$1")
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+        .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+        .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'").replace(/&amp;/g, "&")
+        .trim();
+      // La note est dans le titre sous forme d'etoiles ("Crime 101, 2026 - ★★★½").
+      const ratingOf = (t) => {
+        const m = /(★+)(½?)/.exec(t || "");
+        return m ? m[1].length + (m[2] ? 0.5 : 0) : null;
+      };
+
+      try {
+        const res = await fetch(`https://letterboxd.com/${account}/rss/`, {
+          headers: { "User-Agent": "quoi-regarder/1.0 (flux personnel)", "Accept": "application/rss+xml, application/xml" },
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const xml = await res.text();
+        const items = [];
+        const seen = new Set();
+        for (const block of xml.split("<item>").slice(1)) {
+          const body = block.split("</item>")[0];
+          const pick = (tag) => {
+            const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(body);
+            return m ? decodeXml(m[1]) : null;
+          };
+          const tmdbId = Number(pick("tmdb:movieId"));
+          if (!tmdbId) continue; // item "liste publiee" et non film
+          if (seen.has(tmdbId)) continue; // meme film revu deux fois
+          seen.add(tmdbId);
+          const rawTitle = pick("title");
+          items.push({
+            tmdb_id: tmdbId,
+            media_type: "movie",
+            title: pick("letterboxd:filmTitle") || rawTitle,
+            year: Number(pick("letterboxd:filmYear")) || null,
+            liked: pick("letterboxd:memberLike") === "Yes",
+            rating: ratingOf(rawTitle),
+            date: pick("letterboxd:watchedDate") || null,
+          });
+        }
+        const payload = { source: "letterboxd", account, fetchedAt: Date.now(), count: items.length, items };
+        ctx.waitUntil(env.CE_SOIR_KV.put(cacheKey, JSON.stringify(payload)));
+        return new Response(JSON.stringify(payload), { headers: jsonHeaders });
+      } catch (err) {
+        if (cached) return new Response(JSON.stringify({ ...cached, cache: "stale" }), { headers: jsonHeaders });
+        return new Response(JSON.stringify({ error: "Flux Letterboxd indisponible", detail: String(err) }), { status: 502, headers: jsonHeaders });
+      }
+    }
+
     // Proxy TMDB : /tmdb/<n'importe quel chemin TMDB> -> https://api.themoviedb.org/3/<chemin>
     // La clé TMDB (env.TMDB_API_KEY) est injectée ici, jamais exposée au navigateur.
     if (url.pathname.startsWith("/tmdb/")) {

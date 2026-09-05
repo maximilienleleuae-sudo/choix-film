@@ -1,13 +1,32 @@
 {
   "version": 1,
   "updated": "2026-09-05",
-  "note": "Manifeste des flux de decouverte. Pour ajouter un flux : copier un bloc, changer id/label/path/params, puis git add flux/index.json && git commit && git push. Cloudflare Pages redeploie et le flux apparait dans l'app. Types : tmdb = appel direct a l'API via le proxy du Worker ; reco-likes = recommandations TMDB calculees a partir de la liste J'aime.",
+  "note": "Manifeste des flux de decouverte. Pour ajouter un flux : copier un bloc, changer id/label/path/params, puis git add flux/index.json && git commit && git push. Cloudflare Pages redeploie et le flux apparait dans l'app. Types : tmdb = appel direct a l'API via le proxy du Worker (fonctionne aussi pour /list/{id}, les listes publiques TMDB) ; letterboxd = flux RSS d'un compte Letterboxd normalise par le Worker, il suffit d'indiquer le champ account ; reco-likes = recommandations TMDB calculees a partir de la liste J'aime.",
   "groups": [
-    { "id": "decouverte", "label": "Decouverte" },
-    { "id": "cinephile", "label": "Cinephile" },
-    { "id": "queer", "label": "LGBTQIA+" },
-    { "id": "plateformes", "label": "Sur vos plateformes" },
-    { "id": "series", "label": "Series" }
+    {
+      "id": "decouverte",
+      "label": "Decouverte"
+    },
+    {
+      "id": "veille",
+      "label": "Veille cinephile"
+    },
+    {
+      "id": "cinephile",
+      "label": "Cinephile"
+    },
+    {
+      "id": "queer",
+      "label": "LGBTQIA+"
+    },
+    {
+      "id": "plateformes",
+      "label": "Sur vos plateformes"
+    },
+    {
+      "id": "series",
+      "label": "Series"
+    }
   ],
   "feeds": [
     {
@@ -43,7 +62,9 @@
       "type": "tmdb",
       "media": "movie",
       "path": "/movie/now_playing",
-      "params": { "region": "FR" }
+      "params": {
+        "region": "FR"
+      }
     },
     {
       "id": "upcoming",
@@ -52,7 +73,9 @@
       "type": "tmdb",
       "media": "movie",
       "path": "/movie/upcoming",
-      "params": { "region": "FR" }
+      "params": {
+        "region": "FR"
+      }
     },
     {
       "id": "reco-likes",
@@ -62,7 +85,24 @@
       "media": "movie",
       "description": "Recommandations TMDB calculees a partir d'un titre pris au hasard dans votre liste J'aime."
     },
-
+    {
+      "id": "lb-bfi",
+      "label": "Le BFI vient de voir",
+      "group": "veille",
+      "type": "letterboxd",
+      "media": "movie",
+      "account": "bfi",
+      "description": "Activite Letterboxd du British Film Institute : restaurations, cinema international, selections BFI Flare."
+    },
+    {
+      "id": "lb-dave",
+      "label": "Dave vient de voir",
+      "group": "veille",
+      "type": "letterboxd",
+      "media": "movie",
+      "account": "dave",
+      "description": "Auteur du Top 250 officiel Letterboxd — profil tres cinephile, notes visibles."
+    },
     {
       "id": "top-rated",
       "label": "Les mieux notes de tous les temps",
@@ -113,7 +153,6 @@
         "vote_count.gte": "200"
       }
     },
-
     {
       "id": "queer-best",
       "label": "Les grands films queer",
@@ -183,7 +222,6 @@
         "vote_count.gte": "20"
       }
     },
-
     {
       "id": "netflix-best",
       "label": "Sur Netflix, les mieux notes",
@@ -240,7 +278,6 @@
         "vote_count.gte": "30"
       }
     },
-
     {
       "id": "tv-trending",
       "label": "Series en tendance",
