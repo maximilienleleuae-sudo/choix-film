@@ -105,6 +105,13 @@ const COUNTRIES_FR = [
 const CURRENT_YEAR = new Date().getFullYear();
 const YEAR_OPTIONS = Array.from({ length: CURRENT_YEAR - 1959 }, (_, i) => CURRENT_YEAR - i);
 
+// Classification TMDB pour la France (certification_country=FR), en excluant "NR" qui ne veut
+// rien dire (non classé). Utilisée comme plafond (certification.lte) : choisir "-12" affiche
+// aussi bien les films tous publics que les -12, mais exclut -16 et -18.
+const CERTIFICATIONS_FR = [
+  ["TP", "Tous publics"], ["12", "Interdit -12 ans"], ["16", "Interdit -16 ans"], ["18", "Interdit -18 ans"],
+];
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='#1B1E2B'/><text x='200' y='300' fill='#8B8A99' font-family='sans-serif' font-size='20' text-anchor='middle'>Pas d'affiche</text></svg>`
 );
@@ -247,6 +254,7 @@ function CeSoir() {
   const [activeProviderId, setActiveProviderId] = useState(null);
   const [activeYear, setActiveYear] = useState(null);
   const [activeCountry, setActiveCountry] = useState(null);
+  const [activeCertification, setActiveCertification] = useState(null);
 
   const [tasteProfile, setTasteProfile] = useState(null);
   const [csvStatus, setCsvStatus] = useState("");
@@ -792,12 +800,12 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, certification = activeCertification, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
     setResultsSource("discover");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, originCountry, yearFrom, yearTo };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, originCountry, certification, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       if (includeAdult) params.include_adult = "true";
@@ -811,6 +819,9 @@ function CeSoir() {
       if (keywordIds.length) params.with_keywords = keywordIds.join("|");
       if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
       if (originCountry) params.with_origin_country = originCountry;
+      // Classification utilisée comme plafond : "certification.lte" remonte tout ce qui est classé
+      // au niveau choisi ou en dessous (ex. "-12" inclut aussi Tous publics), jamais les niveaux au-dessus.
+      if (certification) { params.certification_country = "FR"; params["certification.lte"] = certification; }
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
@@ -831,7 +842,7 @@ function CeSoir() {
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry, includeAdult]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry, activeCertification, includeAdult]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -1104,7 +1115,7 @@ function CeSoir() {
     lastFeedRef.current = null;
     const inClassicSearch = resultsSource === "classic" && moodInput.trim();
     if (inClassicSearch) {
-      if ("providerId" in overrides || "keywordIds" in overrides) {
+      if ("providerId" in overrides || "keywordIds" in overrides || "certification" in overrides) {
         showToast("Ce filtre n'est pas compatible avec une recherche par titre/acteur — utilisable en mode Découverte.");
         return;
       }
@@ -1312,7 +1323,8 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       const activeGenreNames = activeGenreIds.map((id) => genreIdToName[id]).filter(Boolean);
       const activeProviderName = providers.find((p) => p.provider_id === activeProviderId)?.provider_name;
       const activeCountryName = COUNTRIES_FR.find(([code]) => code === activeCountry)?.[1];
-      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || !!activeProviderId || !!activeYear || !!activeCountry;
+      const activeCertificationName = CERTIFICATIONS_FR.find(([code]) => code === activeCertification)?.[1];
+      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || !!activeProviderId || !!activeYear || !!activeCountry || !!activeCertification;
       const wantsDiscovery = Math.random() < 1 / 3;
       const recentGenres = [...new Set(lastSurpriseGenresRef.current.flat())];
 
@@ -1322,7 +1334,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises m
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
 
 ${hasActiveFilter
-  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${customKeywords.length ? `, thèmes = ${customKeywords.map((k) => k.name).join(", ")}` : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}.`
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${customKeywords.length ? `, thèmes = ${customKeywords.map((k) => k.name).join(", ")}` : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}${activeCertificationName ? `, classification maximum = ${activeCertificationName}` : ""}.`
   : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
 ${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
 ${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
@@ -1710,6 +1722,11 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCountry ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCountry ? "#1A1305" : C.ink }}>
           <option value="">Pays : Tous</option>
           {COUNTRIES_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+        </select>
+        <select value={activeCertification ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCertification(v); applyFilters({ certification: v }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCertification ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCertification ? "#1A1305" : C.ink }}>
+          <option value="">Classification : Toutes</option>
+          {CERTIFICATIONS_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
         </select>
         <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
