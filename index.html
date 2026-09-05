@@ -119,6 +119,23 @@ const CERTIFICATION_LABELS_FR = {
 };
 const CERT_ORDER = ["TP", "10", "12", "16", "18"];
 
+// Classification FR à partir d'une fiche détail TMDB (movie: release_dates, tv: content_ratings).
+// Films : plusieurs entrées possibles selon le type de sortie (cinéma, VOD, DVD...) et TMDB y
+// mélange parfois le vrai visa CNC et un simple avertissement de plateforme (ex. Prime Video
+// indique "18" sur un film classé -16 en salle) — on priorise donc la sortie en salle (type 3,
+// puis 2) avant tout le reste. Séries : TMDB liste parfois deux entrées FR différentes (données
+// dupliquées à la source) — on garde la plus restrictive des deux.
+function certForFR(detail, mediaType) {
+  if (mediaType === "movie") {
+    const entries = detail.release_dates?.results?.find((r) => r.iso_3166_1 === "FR")?.release_dates || [];
+    const byType = (t) => entries.find((e) => e.type === t && e.certification);
+    return byType(3)?.certification || byType(2)?.certification || entries.find((e) => e.certification)?.certification || null;
+  }
+  const ratings = (detail.content_ratings?.results || []).filter((r) => r.iso_3166_1 === "FR").map((r) => r.rating).filter(Boolean);
+  if (!ratings.length) return null;
+  return ratings.reduce((best, c) => (CERT_ORDER.indexOf(c) > CERT_ORDER.indexOf(best) ? c : best), ratings[0]);
+}
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='#1B1E2B'/><text x='200' y='300' fill='#8B8A99' font-family='sans-serif' font-size='20' text-anchor='middle'>Pas d'affiche</text></svg>`
 );
@@ -835,8 +852,24 @@ function CeSoir() {
 
       const data = await tmdbFetch(`/discover/${type === "movie" ? "movie" : "tv"}`, params);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      const items = (data.results || []).map((it) => ({ ...it, media_type: type }))
+      let items = (data.results || []).map((it) => ({ ...it, media_type: type }))
         .filter((it) => !seenIds.has(`${type}-${it.id}`) && !dislikedKeys.has(`${type}-${it.id}`));
+
+      // Le filtre certification de TMDB matche n'importe quelle mention de classification pour
+      // le pays, y compris des avertissements de plateforme (ex. Prime Video "18" sur un film
+      // classé -16 en salle) — pas toujours fiable. On revérifie donc chaque résultat avec la
+      // même logique que la fiche détail (priorité à la classification salle) avant affichage.
+      if (certification) {
+        const kind = type === "movie" ? "movie" : "tv";
+        const extra = kind === "movie" ? "release_dates" : "content_ratings";
+        const verified = await Promise.all(items.map(async (it) => {
+          try {
+            const detail = await tmdbFetch(`/${kind}/${it.id}`, { append_to_response: extra });
+            return certForFR(detail, type) === certification ? it : null;
+          } catch { return null; }
+        }));
+        items = verified.filter(Boolean);
+      }
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -2277,22 +2310,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               const isSeenD = seenIds.has(detailKey);
               const isFavD = favorites.some((f) => f.key === detailKey);
               const isSharedFavD = sharedFavorites.some((f) => f.key === detailKey);
-              // Classification FR. Films (release_dates) : plusieurs entrées possibles selon le
-              // type de sortie (cinéma, VOD, DVD...) et TMDB y mélange parfois la classification
-              // officielle et un simple avertissement de plateforme (ex. Prime Video) — on
-              // priorise donc la sortie en salle (type 3, puis 2) avant tout le reste. Séries
-              // (content_ratings) : TMDB liste parfois deux entrées FR différentes (données
-              // dupliquées à la source) — on garde la plus restrictive des deux.
-              const certCode = (() => {
-                if (detailItem.media_type === "movie") {
-                  const entries = d.release_dates?.results?.find((r) => r.iso_3166_1 === "FR")?.release_dates || [];
-                  const byType = (t) => entries.find((e) => e.type === t && e.certification);
-                  return byType(3)?.certification || byType(2)?.certification || entries.find((e) => e.certification)?.certification || null;
-                }
-                const ratings = (d.content_ratings?.results || []).filter((r) => r.iso_3166_1 === "FR").map((r) => r.rating).filter(Boolean);
-                if (!ratings.length) return null;
-                return ratings.reduce((best, c) => (CERT_ORDER.indexOf(c) > CERT_ORDER.indexOf(best) ? c : best), ratings[0]);
-              })();
+              const certCode = certForFR(d, detailItem.media_type);
               const certLabel = certCode && CERTIFICATION_LABELS_FR[certCode];
               return (
                 <>
