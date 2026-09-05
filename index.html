@@ -815,6 +815,29 @@ function CeSoir() {
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
   }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId, activeYear, activeCountry]);
 
+  // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
+  // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
+  // de rotation sans effet. Le manifeste passe donc en "any", et on demande explicitement le
+  // paysage des qu'un element entre en plein ecran (la bande-annonce YouTube), avant de relacher
+  // en sortant. screen.orientation.lock n'existe pas sur iOS : le try/catch suffit, iOS gere de
+  // toute facon le plein ecran video nativement et le fait pivoter tout seul.
+  useEffect(() => {
+    const onFullscreenChange = async () => {
+      const inFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      try {
+        if (inFullscreen) await screen.orientation?.lock?.("landscape");
+        else screen.orientation?.unlock?.();
+      } catch {}
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+      try { screen.orientation?.unlock?.(); } catch {}
+    };
+  }, []);
+
   // ---------------------------------------------------------------------------
   // Geste "retour" / bouton retour du mobile
   //
