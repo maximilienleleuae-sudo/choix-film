@@ -282,6 +282,13 @@ function CeSoir() {
   const [resultsHasMore, setResultsHasMore] = useState(false);
   const lastDiscoverParamsRef = useRef({});
   const lastFeedRef = useRef(null);
+  // Geste "retour" du mobile (voir l'effet plus bas) : pile des panneaux ouverts et compteur
+  // d'entrees d'historique posees, pour distinguer une fermeture par le geste d'une fermeture
+  // par un bouton de l'interface.
+  const openOverlaysRef = useRef([]);
+  const overlayDepthRef = useRef(0);
+  const ignorePopRef = useRef(0);
+  const lastBackWarnRef = useRef(0);
   const loadMoreSentinelRef = useRef(null);
   const [resultsError, setResultsError] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -807,6 +814,66 @@ function CeSoir() {
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
   }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId, activeYear, activeCountry]);
+
+  // ---------------------------------------------------------------------------
+  // Geste "retour" / bouton retour du mobile
+  //
+  // L'app tient dans une seule page : sans rien faire, un retour arriere sort du site et retombe
+  // sur l'ecran de connexion Cloudflare Access, ce qui donne l'impression d'etre deconnecte alors
+  // que la session est intacte. On empile donc une entree d'historique par panneau ouvert (fiche
+  // detail, reglages, flux, historique Netflix, tiroir des listes, bande-annonce) : le geste
+  // consomme cette entree et ferme le panneau au lieu de quitter l'app. Quand rien n'est ouvert,
+  // le retour est absorbe et signale par un message — on ne quitte jamais l'app par accident.
+  // ---------------------------------------------------------------------------
+  const openOverlays = [
+    favDrawerOpen && { key: "favs", close: () => setFavDrawerOpen(false) },
+    historyOpen && { key: "history", close: () => setHistoryOpen(false) },
+    settingsOpen && { key: "settings", close: () => setSettingsOpen(false) },
+    fluxOpen && { key: "flux", close: () => setFluxOpen(false) },
+    detailItem && { key: "detail", close: () => setDetailItem(null) },
+    trailerOpenFor && { key: "trailer", close: () => setTrailerOpenFor(null) },
+  ].filter(Boolean);
+
+  useEffect(() => { openOverlaysRef.current = openOverlays; });
+
+  useEffect(() => {
+    const depth = openOverlays.length;
+    const prev = overlayDepthRef.current;
+    if (depth > prev) {
+      for (let i = prev; i < depth; i++) window.history.pushState({ qrOverlay: i + 1 }, "");
+    } else if (depth < prev) {
+      // Fermeture declenchee par l'interface (croix, clic sur le fond) : on retire les entrees
+      // d'historique correspondantes, en demandant a notre gestionnaire de les ignorer.
+      const diff = prev - depth;
+      ignorePopRef.current += diff;
+      window.history.go(-diff);
+    }
+    overlayDepthRef.current = depth;
+  }, [openOverlays.length]);
+
+  useEffect(() => {
+    const onPop = () => {
+      if (ignorePopRef.current > 0) { ignorePopRef.current -= 1; return; }
+      const list = openOverlaysRef.current;
+      if (list.length) {
+        // L'entree vient d'etre consommee par le navigateur : on aligne le compteur avant de
+        // fermer, sinon l'effet ci-dessus croirait devoir retirer une entree de plus.
+        overlayDepthRef.current = list.length - 1;
+        list[list.length - 1].close();
+        return;
+      }
+      // Rien d'ouvert : on repose une sentinelle pour rester dans l'app.
+      window.history.pushState({ qrRoot: 1 }, "");
+      const now = Date.now();
+      if (now - lastBackWarnRef.current > 2500) {
+        lastBackWarnRef.current = now;
+        showToast("Tu es déjà à l'accueil");
+      }
+    };
+    window.history.pushState({ qrRoot: 1 }, "");
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // Chargement du catalogue de flux. Fichier statique servi par Cloudflare Pages a cote de
   // index.html : meme origine (donc couvert par Access, pas de CORS), versionne par git, et
@@ -1647,7 +1714,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                 {trailerOpenFor === current.id && (
                   <div className="mb-3 rounded-lg overflow-hidden" style={{ aspectRatio: "16/9", background: "#000" }}>
                     {trailerLoading && <div className="w-full h-full flex items-center justify-center"><Icon name="loader" color={C.amber} size={20} /></div>}
-                    {!trailerLoading && trailerUrl && <iframe src={trailerUrl} className="w-full h-full" allow="autoplay; encrypted-media" title="Bande-annonce" />}
+                    {!trailerLoading && trailerUrl && <iframe src={trailerUrl} className="w-full h-full" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen title="Bande-annonce" />}
                     {!trailerLoading && !trailerUrl && <p className="text-xs p-3" style={{ color: C.inkMuted }}>Pas de bande-annonce trouvée.</p>}
                   </div>
                 )}
@@ -2009,7 +2076,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                       <Icon name="x" size={18} color={C.ink} />
                     </button>
                     {trailer ? (
-                      <iframe src={`https://www.youtube.com/embed/${trailer.key}`} className="w-full h-full" allow="autoplay; encrypted-media" title="Bande-annonce" />
+                      <iframe src={`https://www.youtube.com/embed/${trailer.key}`} className="w-full h-full" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowFullScreen title="Bande-annonce" />
                     ) : (
                       <img src={d.backdrop_path ? `https://image.tmdb.org/t/p/w780${d.backdrop_path}` : (d.poster_path ? `https://image.tmdb.org/t/p/w500${d.poster_path}` : FALLBACK_POSTER)} alt="" className="w-full h-full object-cover" />
                     )}
