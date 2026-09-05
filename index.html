@@ -214,6 +214,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     thumbsUp: <><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></>,
     rss: <><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1" fill={color}/></>,
     thumbsDown: <><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></>,
+    tag: <><path d="M12.59 2.59 20 10v.01L10.01 20 2 12V4a2 2 0 0 1 2-2h8.59Z"/><circle cx="7.5" cy="7.5" r="1.3" fill={color}/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
 }
@@ -274,6 +275,15 @@ function CeSoir() {
   const [sortBy, setSortBy] = useState("popularity.desc");
   const [lgbtActive, setLgbtActive] = useState(false);
   const [lgbtKeywordId, setLgbtKeywordId] = useState(null);
+  // Filtre "thème" libre : mots-clés TMDB choisis via recherche (/search/keyword), cumulables
+  // en OR avec le toggle LGBT+ ci-dessus (voir combinedKeywordIds). Contrairement à celui-ci,
+  // ils ne sont pas résolus à l'avance : l'utilisateur tape, choisit dans les suggestions.
+  const [customKeywords, setCustomKeywords] = useState([]);
+  const [keywordDrawerOpen, setKeywordDrawerOpen] = useState(false);
+  const [keywordQuery, setKeywordQuery] = useState("");
+  const [keywordSuggestions, setKeywordSuggestions] = useState([]);
+  const [keywordSearchBusy, setKeywordSearchBusy] = useState(false);
+  const keywordDebounceRef = useRef(null);
 
   const [results, setResults] = useState([]);
   const [resultsLoading, setResultsLoading] = useState(false);
@@ -777,7 +787,7 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = (lgbtActive && lgbtKeywordId ? [lgbtKeywordId] : []), providerId = activeProviderId, originCountry = activeCountry, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
     setResultsSource("discover");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
@@ -790,7 +800,9 @@ function CeSoir() {
       if (genreIds.length) params.with_genres = genreIds.join("|");
       if (minVote) params["vote_average.gte"] = String(minVote);
       if (castIds.length) params.with_cast = castIds.join(",");
-      if (keywordIds.length) params.with_keywords = keywordIds.join(",");
+      // "|" = OU logique (voir commentaire genres ci-dessus) : un film qui matche un seul des
+      // thèmes cumulés (LGBT+ et/ou mots-clés libres) doit ressortir, pas seulement s'il les a tous.
+      if (keywordIds.length) params.with_keywords = keywordIds.join("|");
       if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
       if (originCountry) params.with_origin_country = originCountry;
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
@@ -813,7 +825,7 @@ function CeSoir() {
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId, activeYear, activeCountry]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -853,6 +865,7 @@ function CeSoir() {
     historyOpen && { key: "history", close: () => setHistoryOpen(false) },
     settingsOpen && { key: "settings", close: () => setSettingsOpen(false) },
     fluxOpen && { key: "flux", close: () => setFluxOpen(false) },
+    keywordDrawerOpen && { key: "keyword", close: () => setKeywordDrawerOpen(false) },
     detailItem && { key: "detail", close: () => setDetailItem(null) },
     trailerOpenFor && { key: "trailer", close: () => setTrailerOpenFor(null) },
   ].filter(Boolean);
@@ -1146,7 +1159,49 @@ function CeSoir() {
   function toggleLgbt() {
     const next = !lgbtActive;
     setLgbtActive(next);
-    applyFilters({ keywordIds: next && lgbtKeywordId ? [lgbtKeywordId] : [] });
+    applyFilters({ keywordIds: combinedKeywordIds(customKeywords, next) });
+  }
+
+  // Fusionne le toggle LGBT+ (id résolu une fois pour toutes) et les mots-clés libres choisis
+  // dans le tiroir Thème, pour alimenter with_keywords de runDiscover en une seule liste (OR).
+  function combinedKeywordIds(custom = customKeywords, lgbt = lgbtActive) {
+    const ids = [];
+    if (lgbt && lgbtKeywordId) ids.push(lgbtKeywordId);
+    for (const k of custom) if (!ids.includes(k.id)) ids.push(k.id);
+    return ids;
+  }
+
+  // Recherche TMDB de mots-clés en temps réel (debounce 350ms) pour le tiroir Thème — on ne
+  // résout jamais un mot-clé "à l'aveugle" comme pour LGBT+ : l'utilisateur choisit lui-même
+  // dans les suggestions, car plusieurs mots-clés proches peuvent correspondre à sa saisie.
+  function onKeywordQueryChange(value) {
+    setKeywordQuery(value);
+    clearTimeout(keywordDebounceRef.current);
+    const q = value.trim();
+    if (q.length < 2) { setKeywordSuggestions([]); setKeywordSearchBusy(false); return; }
+    setKeywordSearchBusy(true);
+    keywordDebounceRef.current = setTimeout(async () => {
+      try {
+        const r = await tmdbFetch("/search/keyword", { query: q });
+        setKeywordSuggestions((r.results || []).slice(0, 8));
+      } catch { setKeywordSuggestions([]); }
+      setKeywordSearchBusy(false);
+    }, 350);
+  }
+
+  function addCustomKeyword(kw) {
+    if (customKeywords.some((k) => k.id === kw.id)) return;
+    const next = [...customKeywords, { id: kw.id, name: kw.name }];
+    setCustomKeywords(next);
+    setKeywordQuery("");
+    setKeywordSuggestions([]);
+    applyFilters({ keywordIds: combinedKeywordIds(next, lgbtActive) });
+  }
+
+  function removeCustomKeyword(id) {
+    const next = customKeywords.filter((k) => k.id !== id);
+    setCustomKeywords(next);
+    applyFilters({ keywordIds: combinedKeywordIds(next, lgbtActive) });
   }
 
   async function openDetail(item) {
@@ -1230,7 +1285,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       const activeGenreNames = activeGenreIds.map((id) => genreIdToName[id]).filter(Boolean);
       const activeProviderName = providers.find((p) => p.provider_id === activeProviderId)?.provider_name;
       const activeCountryName = COUNTRIES_FR.find(([code]) => code === activeCountry)?.[1];
-      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || !!activeProviderId || !!activeYear || !!activeCountry;
+      const hasActiveFilter = activeGenreNames.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || !!activeProviderId || !!activeYear || !!activeCountry;
       const wantsDiscovery = Math.random() < 1 / 3;
       const recentGenres = [...new Set(lastSurpriseGenresRef.current.flat())];
 
@@ -1240,7 +1295,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises m
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
 
 ${hasActiveFilter
-  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}.`
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${customKeywords.length ? `, thèmes = ${customKeywords.map((k) => k.name).join(", ")}` : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}.`
   : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
 ${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
 ${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
@@ -1598,6 +1653,10 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           style={{ background: lgbtActive ? C.amber : C.bgCard, color: lgbtActive ? "#1A1305" : C.ink, border: `1px solid ${C.border}`, opacity: lgbtKeywordId ? 1 : 0.5 }}>
           🏳️‍🌈 LGBT+
         </button>
+        <button onClick={() => setKeywordDrawerOpen(true)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
+          style={{ background: customKeywords.length ? C.amber : C.bgCard, color: customKeywords.length ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+          <Icon name="tag" size={12} /> {customKeywords.length ? `Thème (${customKeywords.length})` : "Thème"}
+        </button>
         <button onClick={() => { const v = minRating >= 7 ? 0 : 7; setMinRating(v); applyFilters({ minVote: v }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: minRating >= 7 ? C.amber : C.bgCard, color: minRating >= 7 ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="star" size={12} fill={minRating >= 7 ? "#1A1305" : "none"} /> 7+
@@ -1878,6 +1937,51 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               <p className="text-[11px] pt-1" style={{ color: C.inkMuted }}>
                 Catalogue v{feedsManifest.version} · mis à jour le {feedsManifest.updated} · {feedsManifest.feeds.length} flux. Pour en ajouter un : éditer <span className="font-mono">flux/index.json</span> puis pousser sur GitHub.
               </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {keywordDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setKeywordDrawerOpen(false)}>
+          <div className="w-full rounded-t-2xl p-5 overflow-y-auto" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-display text-xl">Thème</h3>
+              <button onClick={() => setKeywordDrawerOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+            </div>
+            <p className="text-xs mb-3" style={{ color: C.inkMuted }}>
+              Filtre par mot-clé TMDB (ambiance, sujet, univers...), cumulable avec les autres filtres. Fonctionne en Découverte, pas en recherche par titre/acteur.
+            </p>
+            <div className="relative mb-3">
+              <input value={keywordQuery} onChange={(e) => onKeywordQueryChange(e.target.value)} placeholder="Ex : vampire, road trip, huis clos..."
+                className="w-full rounded-lg px-3 py-2.5 text-sm" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }} />
+              {keywordSearchBusy && <div className="absolute right-3 top-1/2 -translate-y-1/2"><Icon name="loader" size={14} color={C.inkMuted} /></div>}
+              {!keywordSearchBusy && keywordQuery.trim().length >= 2 && (
+                <div className="mt-1.5 rounded-lg overflow-hidden" style={{ border: `1px solid ${C.border}` }}>
+                  {keywordSuggestions.length === 0 && (
+                    <p className="text-xs px-3 py-2.5" style={{ color: C.inkMuted, background: C.bg }}>Aucun mot-clé trouvé.</p>
+                  )}
+                  {keywordSuggestions.map((kw) => {
+                    const already = customKeywords.some((k) => k.id === kw.id);
+                    return (
+                      <button key={kw.id} disabled={already} onMouseDown={(e) => { e.preventDefault(); addCustomKeyword(kw); }}
+                        className="w-full text-left text-sm px-3 py-2.5" style={{ background: C.bg, color: already ? C.inkMuted : C.ink, opacity: already ? 0.5 : 1, borderTop: `1px solid ${C.border}` }}>
+                        {kw.name}{already ? " · déjà ajouté" : ""}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {customKeywords.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {customKeywords.map((k) => (
+                  <button key={k.id} onClick={() => removeCustomKeyword(k.id)} className="rounded-full pl-3 pr-2 py-1 text-xs font-medium flex items-center gap-1"
+                    style={{ background: C.amber, color: "#1A1305" }}>
+                    {k.name} <Icon name="x" size={11} color="#1A1305" />
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         </div>
