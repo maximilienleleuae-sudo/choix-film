@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "updated": "2026-09-05",
+  "note": "Manifeste des flux de decouverte. Pour ajouter un flux : copier un bloc, changer id/label/path/params, puis git add flux/index.json && git commit && git push. Cloudflare Pages redeploie et le flux apparait dans l'app. Types : tmdb = appel direct a l'API via le proxy du Worker ; reco-likes = recommandations TMDB calculees a partir de la liste J'aime.",
+  "groups": [
+    { "id": "decouverte", "label": "Decouverte" },
+    { "id": "cinephile", "label": "Cinephile" },
+    { "id": "queer", "label": "LGBTQIA+" },
+    { "id": "plateformes", "label": "Sur vos plateformes" },
+    { "id": "series", "label": "Series" }
+  ],
+  "feeds": [
+    {
+      "id": "trending-day",
+      "label": "Tendances du jour",
+      "group": "decouverte",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/trending/movie/day",
+      "description": "Ce qui bouge sur les dernieres 24 heures."
+    },
+    {
+      "id": "trending-week",
+      "label": "Tendances de la semaine",
+      "group": "decouverte",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/trending/movie/week",
+      "description": "Plus stable que le classement quotidien."
+    },
+    {
+      "id": "popular",
+      "label": "Populaires en ce moment",
+      "group": "decouverte",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/movie/popular"
+    },
+    {
+      "id": "now-playing",
+      "label": "Actuellement au cinema",
+      "group": "decouverte",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/movie/now_playing",
+      "params": { "region": "FR" }
+    },
+    {
+      "id": "upcoming",
+      "label": "Prochaines sorties",
+      "group": "decouverte",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/movie/upcoming",
+      "params": { "region": "FR" }
+    },
+    {
+      "id": "reco-likes",
+      "label": "Parce que vous avez aime...",
+      "group": "decouverte",
+      "type": "reco-likes",
+      "media": "movie",
+      "description": "Recommandations TMDB calculees a partir d'un titre pris au hasard dans votre liste J'aime."
+    },
+
+    {
+      "id": "top-rated",
+      "label": "Les mieux notes de tous les temps",
+      "group": "cinephile",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/movie/top_rated"
+    },
+    {
+      "id": "best-recent",
+      "label": "Meilleurs films recents",
+      "group": "cinephile",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "500",
+        "primary_release_date.gte": "2021-01-01"
+      },
+      "description": "Note elevee, mais avec assez de votes pour etre credible."
+    },
+    {
+      "id": "hidden-gems",
+      "label": "Pepites confidentielles",
+      "group": "cinephile",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "sort_by": "vote_average.desc",
+        "vote_average.gte": "7.2",
+        "vote_count.gte": "60",
+        "vote_count.lte": "400"
+      },
+      "description": "Tres bien notes mais peu vus : le contraire d'un top grand public."
+    },
+    {
+      "id": "french-best",
+      "label": "Cinema francais, les mieux notes",
+      "group": "cinephile",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_original_language": "fr",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "200"
+      }
+    },
+
+    {
+      "id": "queer-best",
+      "label": "Les grands films queer",
+      "group": "queer",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_keywords": "158718|380747",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "80"
+      },
+      "description": "Mots-cles TMDB lgbt (158718) et lgbt+ (380747)."
+    },
+    {
+      "id": "queer-recent",
+      "label": "Sorties queer recentes",
+      "group": "queer",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_keywords": "158718|380747",
+        "primary_release_date.gte": "2020-01-01",
+        "sort_by": "popularity.desc",
+        "vote_count.gte": "20"
+      }
+    },
+    {
+      "id": "queer-romance",
+      "label": "Romances gay et queer",
+      "group": "queer",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_keywords": "240305|353629",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "30"
+      },
+      "description": "Mots-cles gay romance (240305) et lgbt romance (353629)."
+    },
+    {
+      "id": "queer-fr",
+      "label": "Cinema queer francophone",
+      "group": "queer",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_keywords": "158718|380747",
+        "with_original_language": "fr",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "15"
+      }
+    },
+    {
+      "id": "queer-series",
+      "label": "Series queer",
+      "group": "queer",
+      "type": "tmdb",
+      "media": "tv",
+      "path": "/discover/tv",
+      "params": {
+        "with_keywords": "158718|380747",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "20"
+      }
+    },
+
+    {
+      "id": "netflix-best",
+      "label": "Sur Netflix, les mieux notes",
+      "group": "plateformes",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_watch_providers": "8",
+        "watch_region": "FR",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "150"
+      }
+    },
+    {
+      "id": "prime-best",
+      "label": "Sur Prime Video, les mieux notes",
+      "group": "plateformes",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_watch_providers": "119",
+        "watch_region": "FR",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "150"
+      }
+    },
+    {
+      "id": "disney-best",
+      "label": "Sur Disney+, les mieux notes",
+      "group": "plateformes",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_watch_providers": "337",
+        "watch_region": "FR",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "150"
+      }
+    },
+    {
+      "id": "arte-best",
+      "label": "Sur Arte",
+      "group": "plateformes",
+      "type": "tmdb",
+      "media": "movie",
+      "path": "/discover/movie",
+      "params": {
+        "with_watch_providers": "234",
+        "watch_region": "FR",
+        "sort_by": "vote_average.desc",
+        "vote_count.gte": "30"
+      }
+    },
+
+    {
+      "id": "tv-trending",
+      "label": "Series en tendance",
+      "group": "series",
+      "type": "tmdb",
+      "media": "tv",
+      "path": "/trending/tv/week"
+    },
+    {
+      "id": "tv-top-rated",
+      "label": "Series les mieux notees",
+      "group": "series",
+      "type": "tmdb",
+      "media": "tv",
+      "path": "/tv/top_rated"
+    }
+  ]
+}

@@ -212,6 +212,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     home: <><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>,
     eyeOff: <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a17.5 17.5 0 0 1-2.16 3.19M6.61 6.61C3.9 8.36 2 12 2 12s3 8 10 8a9.27 9.27 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></>,
     thumbsUp: <><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></>,
+    rss: <><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1" fill={color}/></>,
     thumbsDown: <><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
@@ -280,6 +281,7 @@ function CeSoir() {
   const [resultsPage, setResultsPage] = useState(1);
   const [resultsHasMore, setResultsHasMore] = useState(false);
   const lastDiscoverParamsRef = useRef({});
+  const lastFeedRef = useRef(null);
   const loadMoreSentinelRef = useRef(null);
   const [resultsError, setResultsError] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -296,6 +298,12 @@ function CeSoir() {
   const [likedItems, setLikedItems] = useState([]);
   const [dislikedItems, setDislikedItems] = useState([]);
   const [favDrawerOpen, setFavDrawerOpen] = useState(false);
+  // Flux de decouverte : catalogue de sources decrit dans flux/index.json, servi par Pages a cote
+  // de l'app. Ajouter un flux = editer ce fichier et pousser, aucun code a toucher.
+  const [feedsManifest, setFeedsManifest] = useState(null);
+  const [feedsError, setFeedsError] = useState("");
+  const [fluxOpen, setFluxOpen] = useState(false);
+  const [activeFeed, setActiveFeed] = useState(null);
   const [favDrawerTab, setFavDrawerTab] = useState("perso");
 
   const [trailerOpenFor, setTrailerOpenFor] = useState(null);
@@ -800,6 +808,84 @@ function CeSoir() {
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
   }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, activeProviderId, activeYear, activeCountry]);
 
+  // Chargement du catalogue de flux. Fichier statique servi par Cloudflare Pages a cote de
+  // index.html : meme origine (donc couvert par Access, pas de CORS), versionne par git, et
+  // modifiable sans toucher au code de l'app ni au Worker.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("./flux/index.json", { cache: "no-cache" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        if (Array.isArray(data?.feeds)) setFeedsManifest(data);
+        else throw new Error("format inattendu");
+      } catch {
+        setFeedsError("Catalogue de flux introuvable (flux/index.json).");
+      }
+    })();
+  }, []);
+
+  // Execute un flux du catalogue. Volontairement calque sur runDiscover : memes filtres deja-vu /
+  // j'aime-pas, meme pagination, meme etat "results" — donc les vues grille, liste et swipe et
+  // tous les boutons de listes fonctionnent dessus sans une ligne de plus.
+  const runFeed = useCallback(async ({ feed, page = 1, append = false } = {}) => {
+    if (!feed) return;
+    setResultsSource("feed");
+    lastFeedRef.current = feed;
+    if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); setMoodError(""); }
+    try {
+      const media = feed.media === "tv" ? "tv" : "movie";
+      let data;
+      if (feed.type === "reco-likes") {
+        // Pas de chemin fixe : on part d'un titre pris au hasard dans "J'aime" et on demande a
+        // TMDB ses recommandations. Le flux n'a donc de sens que si la liste n'est pas vide.
+        const pool = likedItems.filter((f) => f.media_type === "movie" || f.media_type === "tv");
+        if (!pool.length) {
+          setResultsError("Ajoute d'abord quelques titres a J'aime : ce flux part de tes gouts.");
+          setResults([]); setResultsHasMore(false);
+          if (append) setResultsLoadingMore(false); else setResultsLoading(false);
+          return;
+        }
+        const baseLabel = feed.baseLabel || feed.label;
+        const seed = append && feed.seed ? feed.seed : pool[Math.floor(Math.random() * pool.length)];
+        lastFeedRef.current = { ...feed, baseLabel, seed };
+        setActiveFeed({ ...feed, baseLabel, label: `${baseLabel} ${seed.title}` });
+        data = await tmdbFetch(`/${seed.media_type}/${seed.id}/recommendations`, { page: String(page) });
+      } else {
+        data = await tmdbFetch(feed.path, { ...(feed.params || {}), page: String(page) });
+      }
+      const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
+      const items = (data.results || [])
+        .map((it) => ({ ...it, media_type: it.media_type === "tv" || it.media_type === "movie" ? it.media_type : media }))
+        .filter((it) => !seenIds.has(`${it.media_type}-${it.id}`) && !dislikedKeys.has(`${it.media_type}-${it.id}`));
+
+      setResultsPage(page);
+      setResultsHasMore(page < (data.total_pages || 1));
+      setResults((prev) => {
+        if (!append) return items;
+        const already = new Set(prev.map((p) => `${p.media_type}-${p.id}`));
+        return [...prev, ...items.filter((it) => !already.has(`${it.media_type}-${it.id}`))];
+      });
+      if (!append) setCurrentIndex(0);
+      if (!append && !items.length) setResultsError("Ce flux ne renvoie rien de nouveau — tout est deja vu ou ecarte.");
+    } catch {
+      if (!append) setResultsError("Impossible de charger ce flux (Worker/TMDB hors ligne ?).");
+    }
+    if (append) setResultsLoadingMore(false); else setResultsLoading(false);
+  }, [seenIds, dislikedItems, likedItems]);
+
+  function openFeed(feed) {
+    setActiveFeed(feed);
+    setFluxOpen(false);
+    runFeed({ feed, page: 1, append: false });
+  }
+
+  function closeFeed() {
+    setActiveFeed(null);
+    lastFeedRef.current = null;
+    applyFilters({});
+  }
+
   // Recherche "classique" : recherche TMDB par titre (/search), sans interprétation IA — pour
   // retrouver un titre précis quand on sait déjà ce qu'on cherche plutôt que décrire une envie.
   // En page 1, on complète aussi avec la filmographie de la personne la plus pertinente trouvée
@@ -873,6 +959,9 @@ function CeSoir() {
   // supporte pas (il faudrait un appel par résultat pour les vérifier un par un) : ils restent donc
   // réservés au mode Découverte.
   function applyFilters(overrides = {}) {
+    // Toucher un filtre sort du flux en cours : les criteres de la home reprennent la main.
+    setActiveFeed(null);
+    lastFeedRef.current = null;
     const inClassicSearch = resultsSource === "classic" && moodInput.trim();
     if (inClassicSearch) {
       if ("providerId" in overrides || "keywordIds" in overrides) {
@@ -917,7 +1006,8 @@ function CeSoir() {
 
   function loadMoreResults() {
     if (resultsLoading || resultsLoadingMore || !resultsHasMore) return;
-    if (resultsSource === "classic") runClassicSearch({ page: resultsPage + 1, append: true });
+    if (resultsSource === "feed") runFeed({ feed: lastFeedRef.current, page: resultsPage + 1, append: true });
+    else if (resultsSource === "classic") runClassicSearch({ page: resultsPage + 1, append: true });
     else runDiscover({ ...lastDiscoverParamsRef.current, page: resultsPage + 1, append: true });
   }
 
@@ -1325,6 +1415,9 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           <button onClick={() => setHistoryOpen(true)} aria-label="Historique Netflix" className="rounded-full flex items-center justify-center" style={{ background: C.bgCard, width: 36, height: 36 }}>
             <span aria-hidden="true" style={{ color: "#E50914", fontWeight: 800, fontSize: 17, fontFamily: "'Inter', sans-serif", lineHeight: 1 }}>N</span>
           </button>
+          <button onClick={() => setFluxOpen(true)} aria-label="Flux de découverte" className="p-2 rounded-full" style={{ background: activeFeed ? C.amber : C.bgCard }}>
+            <Icon name="rss" color={activeFeed ? "#1A1305" : C.inkMuted} />
+          </button>
           <button onClick={() => setSettingsOpen(true)} aria-label="Réglages" className="p-2 rounded-full" style={{ background: C.bgCard }}>
             <Icon name="settings" color={C.inkMuted} />
           </button>
@@ -1434,6 +1527,17 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           ))}
         </div>
       </div>
+
+      {activeFeed && (
+        <div className="mx-5 mb-1 rounded-xl px-3 py-2 flex items-center gap-2" style={{ background: `${C.amber}18`, border: `1px solid ${C.amber}55` }}>
+          <Icon name="rss" size={14} color={C.amber} />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium truncate">{activeFeed.label}</p>
+            {activeFeed.description && <p className="text-[11px] truncate" style={{ color: C.inkMuted }}>{activeFeed.description}</p>}
+          </div>
+          <button onClick={closeFeed} aria-label="Quitter le flux" className="p-1 shrink-0"><Icon name="x" size={15} color={C.inkMuted} /></button>
+        </div>
+      )}
 
       <main className={`flex-1 px-5 py-6 relative ${(resultsView === "grid" || resultsView === "list") && results.length ? "" : "flex flex-col items-center justify-center"}`} style={{ minHeight: 460 }}>
         {resultsLoading && <div className="flex justify-center"><Icon name="loader" color={C.amber} size={26} /></div>}
@@ -1629,6 +1733,48 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
           </div>
         );
       })()}
+
+      {fluxOpen && (
+        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setFluxOpen(false)}>
+          <div className="w-full rounded-t-2xl p-5 overflow-y-auto" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-display text-xl">Flux de découverte</h3>
+              <button onClick={() => setFluxOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+            </div>
+            <p className="text-xs mb-4" style={{ color: C.inkMuted }}>
+              Des sélections vivantes, actualisées par TMDB. Ouvre-en une et retrouve tes boutons habituels pour classer les titres.
+            </p>
+            {feedsError && <p className="text-sm" style={{ color: C.danger }}>{feedsError}</p>}
+            {!feedsManifest && !feedsError && <div className="flex justify-center py-6"><Icon name="loader" color={C.amber} size={22} /></div>}
+            {feedsManifest && (feedsManifest.groups || []).map((g) => {
+              const list = feedsManifest.feeds.filter((f) => f.group === g.id);
+              if (!list.length) return null;
+              return (
+                <div key={g.id} className="mb-4">
+                  <p className="text-xs font-mono tracking-widest mb-2" style={{ color: C.amberDim }}>{g.label.toUpperCase()}</p>
+                  <div className="flex flex-col gap-1.5">
+                    {list.map((f) => (
+                      <button key={f.id} onClick={() => openFeed(f)} className="w-full text-left rounded-xl px-3.5 py-2.5 flex items-center gap-3"
+                        style={{ background: activeFeed?.id === f.id ? C.amber : C.bg, border: `1px solid ${C.border}`, color: activeFeed?.id === f.id ? "#1A1305" : C.ink }}>
+                        <Icon name={f.media === "tv" ? "tv" : "film"} size={15} color={activeFeed?.id === f.id ? "#1A1305" : C.inkMuted} />
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-sm font-medium truncate">{f.label}</span>
+                          {f.description && <span className="block text-[11px] truncate" style={{ color: activeFeed?.id === f.id ? "#1A1305bb" : C.inkMuted }}>{f.description}</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {feedsManifest && (
+              <p className="text-[11px] pt-1" style={{ color: C.inkMuted }}>
+                Catalogue v{feedsManifest.version} · mis à jour le {feedsManifest.updated} · {feedsManifest.feeds.length} flux. Pour en ajouter un : éditer <span className="font-mono">flux/index.json</span> puis pousser sur GitHub.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {settingsOpen && (
         <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setSettingsOpen(false)}>
