@@ -237,6 +237,9 @@ function CeSoir() {
   const [backupStatus, setBackupStatus] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
   const [isIosDevice, setIsIosDevice] = useState(false);
+  // Contenu adulte TMDB (include_adult) : off par défaut (comportement natif de l'API), activable
+  // uniquement depuis Réglages — jamais un simple filtre de la barre pour éviter un clic accidentel.
+  const [includeAdult, setIncludeAdult] = useState(false);
 
   const [genreMap, setGenreMap] = useState({});
   const [genresLoaded, setGenresLoaded] = useState(false);
@@ -344,6 +347,8 @@ function CeSoir() {
       if (seen?.value) { try { setSeenItems(JSON.parse(seen.value)); } catch {} }
       const favs = await storageGet("favorites");
       if (favs?.value) { try { setFavorites(JSON.parse(favs.value)); } catch {} }
+      const adult = await storageGet("include-adult");
+      if (adult?.value === "1") setIncludeAdult(true);
       setBooted(true);
     })();
   }, []);
@@ -795,6 +800,7 @@ function CeSoir() {
     lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, originCountry, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
+      if (includeAdult) params.include_adult = "true";
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
       // la fois), ce qui ne renvoie quasiment jamais de résultat dès qu'on combine plusieurs genres.
       if (genreIds.length) params.with_genres = genreIds.join("|");
@@ -825,7 +831,7 @@ function CeSoir() {
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
     } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
     if (append) setResultsLoadingMore(false); else setResultsLoading(false);
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry, includeAdult]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -1034,6 +1040,7 @@ function CeSoir() {
     try {
       const kind = type === "movie" ? "movie" : "tv";
       const searchParams = { query, page: String(page) };
+      if (includeAdult) searchParams.include_adult = "true";
       if (yearFrom) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
@@ -1168,6 +1175,13 @@ function CeSoir() {
       } catch {}
     })();
   }, [lgbtKeywordId]);
+
+  function toggleIncludeAdult() {
+    const next = !includeAdult;
+    setIncludeAdult(next);
+    storageSet("include-adult", next ? "1" : "0");
+    applyFilters({});
+  }
 
   function toggleLgbt() {
     const next = !lgbtActive;
@@ -2036,6 +2050,16 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                 </button>
               </>
             )}
+
+            <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>CONTENU</label>
+            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>
+              Inclure le contenu classé adulte (pornographique) dans les recherches et découvertes. Désactivé par défaut — TMDB filtre déjà ce contenu tant que ce n'est pas activé ici.
+            </p>
+            <button onClick={toggleIncludeAdult}
+              className="w-full text-center text-sm py-2.5 rounded-lg mb-4 flex items-center justify-center gap-2"
+              style={{ background: includeAdult ? C.danger : C.bg, color: includeAdult ? "#fff" : C.ink, border: `1px solid ${C.border}` }}>
+              {includeAdult ? "Contenu adulte activé — désactiver" : "Activer le contenu adulte"}
+            </button>
 
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>CONNEXION TMDB</label>
             <p className="text-xs mb-1" style={{ color: C.inkMuted }}>La clé TMDB est gérée côté serveur (Worker Cloudflare) — rien à saisir ici.</p>
