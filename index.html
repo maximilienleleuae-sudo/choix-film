@@ -50,6 +50,25 @@ const KNOWN_PEOPLE = [
   { email: "maxous.1984@gmail.com", name: "Max" },
   { email: "mathieu.burkhart@gmail.com", name: "Mathieu" },
 ];
+
+// Plafonds alignés sur ceux du Worker, qui reste seul juge : l'app ne doit jamais tronquer plus
+// tôt que le serveur, sinon des titres bien stockés côté KV disparaissent de l'affichage (et d'un
+// export fait dans la foulée), ce qui ressemble à une purge alors que rien n'est perdu.
+const CAPS = { perso: 50, foyer: 300, like: 300, dislike: 300, seen: 300 };
+
+// Le site est protégé par Cloudflare Access (policy "Foyer autorisé", 2 emails). L'email connecté
+// est donc déjà connu de Cloudflare et lisible sur /cdn-cgi/access/get-identity, même origine, sans
+// CORS : on en déduit qui utilise l'app, sur n'importe quel appareil, sans rien stocker et sans
+// rien demander. Le choix manuel des Réglages ne sert plus que de secours (dev local, appel KO).
+async function fetchAccessIdentity() {
+  try {
+    const res = await fetch("/cdn-cgi/access/get-identity", { credentials: "include" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const email = String(data?.email || "").trim().toLowerCase();
+    return KNOWN_PEOPLE.some((p) => p.email === email) ? email : null;
+  } catch { return null; }
+}
 function urlBase64ToUint8Array(base64) {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
   const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
@@ -208,7 +227,8 @@ function CeSoir() {
   const [pwaEvent, setPwaEvent] = useState(null);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
 
-  const [whoAmI, setWhoAmI] = useState(null); // email choisi une fois dans les Réglages
+  const [whoAmI, setWhoAmI] = useState(null); // email fourni par Cloudflare Access (ou choisi à la main en secours)
+  const [identityAuto, setIdentityAuto] = useState(false);
   const [pushStatus, setPushStatus] = useState("idle"); // idle | loading | on | unsupported | denied
   const [pushBusy, setPushBusy] = useState(false);
 
@@ -366,8 +386,18 @@ function CeSoir() {
   // fois dans les Réglages et mémorisé en local — pas un vrai compte, juste une étiquette.
   useEffect(() => {
     (async () => {
-      const who = await storageGet("who-am-i");
-      if (who?.value) setWhoAmI(who.value);
+      // Access d'abord : c'est la seule source qui survit à un nettoyage du navigateur, à un
+      // changement d'appareil ou à une réinstallation du PWA. Le localStorage n'est plus qu'un
+      // cache de secours si l'appel échoue (hors ligne, ouverture en local hors Cloudflare).
+      const identity = await fetchAccessIdentity();
+      if (identity) {
+        setWhoAmI(identity);
+        setIdentityAuto(true);
+        await storageSet("who-am-i", identity);
+      } else {
+        const who = await storageGet("who-am-i");
+        if (who?.value) setWhoAmI(who.value);
+      }
       if (typeof Notification === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
         setPushStatus("unsupported");
         return;
@@ -1067,7 +1097,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     const key = `${item.media_type}-${item.id}`;
     if (seenIds.has(key)) return key;
     const entry = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item), genreIds: genreIdsOf(item) };
-    persistSeenItems([entry, ...seenItems].slice(0, 300));
+    persistSeenItems([entry, ...seenItems].slice(0, CAPS.seen));
     sharedFetch("/seen-add", { method: "POST", body: { item: entry } }).catch(() => {}); // déjà vu = partagé entre les 2
     return key;
   }
@@ -1086,7 +1116,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     const key = `${item.media_type}-${item.id}`;
     if (favorites.some((f) => f.key === key)) { advanceCard(); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
-    setFavorites((prev) => [fav, ...prev].slice(0, 12));
+    setFavorites((prev) => [fav, ...prev].slice(0, CAPS.perso));
     sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item: fav } }).catch(() => {});
     showToast("Ajouté à ta sélection perso ♥"); advanceCard();
   }
@@ -1100,7 +1130,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     const key = `${item.media_type}-${item.id}`;
     if (sharedFavorites.some((f) => f.key === key)) { showToast("Déjà dans la sélection du foyer"); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
-    setSharedFavorites((prev) => [fav, ...prev].slice(0, 24));
+    setSharedFavorites((prev) => [fav, ...prev].slice(0, CAPS.foyer));
     sharedFetch("/favorite-add", { method: "POST", body: { item: fav, by: whoAmI } }).catch(() => {});
     showToast("Ajouté à la sélection du foyer 🏠");
   }
@@ -1119,7 +1149,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     sharedFetch("/dislike-remove", { method: "POST", body: { key } }).catch(() => {});
     if (likedItems.some((f) => f.key === key)) { showToast("Déjà dans les goûts du foyer"); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item), genreIds: genreIdsOf(item) };
-    setLikedItems((prev) => [fav, ...prev].slice(0, 60));
+    setLikedItems((prev) => [fav, ...prev].slice(0, CAPS.like));
     sharedFetch("/like-add", { method: "POST", body: { item: fav } }).catch(() => {});
     showToast("Ajouté aux goûts du foyer 👍");
   }
@@ -1135,7 +1165,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
     sharedFetch("/like-remove", { method: "POST", body: { key } }).catch(() => {});
     if (dislikedItems.some((f) => f.key === key)) { showToast("Déjà exclu des suggestions"); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item), genreIds: genreIdsOf(item) };
-    setDislikedItems((prev) => [fav, ...prev].slice(0, 60));
+    setDislikedItems((prev) => [fav, ...prev].slice(0, CAPS.dislike));
     sharedFetch("/dislike-add", { method: "POST", body: { item: fav } }).catch(() => {});
     showToast("Ne sera plus suggéré 👎");
   }
@@ -1222,9 +1252,19 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
   // perso-add), qui ignorent déjà côté serveur les clés déjà présentes — donc rejouer une
   // sauvegarde plusieurs fois, ou sur des listes qui ont évolué depuis, ne fait qu'ajouter ce qui
   // manque, sans jamais rien effacer.
+  // Les envois sont SÉQUENTIELS et non parallèles : chaque route -add fait un lire-modifier-
+  // réécrire sur une seule clé KV, et Cloudflare KV n'a pas d'écriture atomique. En parallèle, les
+  // requêtes lisent toutes la même version et la dernière écrase les autres — un réimport de 30
+  // titres pouvait donc n'en enregistrer qu'un seul, voire tronquer une liste existante.
   async function importLists(file) {
     setBackupBusy(true);
     setBackupStatus("Réimport en cours…");
+    // Envoi un par un, dans l'ordre : voir le commentaire sur la course KV ci-dessus.
+    const sendEach = async (items, path, makeBody) => {
+      for (const item of items) {
+        await sharedFetch(path, { method: "POST", body: makeBody(item) }).catch(() => {});
+      }
+    };
     const mergeUnique = (base, incoming) => {
       const known = new Set(base.map((f) => f.key));
       const fresh = (incoming || []).filter((it) => it?.key && !known.has(it.key));
@@ -1236,25 +1276,25 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
 
       if (Array.isArray(data.dejavu) && data.dejavu.length) {
         await persistSeenItems(mergeUnique(seenItems, data.dejavu));
-        await Promise.all(data.dejavu.map((item) => sharedFetch("/seen-add", { method: "POST", body: { item } }).catch(() => {})));
+        await sendEach(data.dejavu, "/seen-add", (item) => ({ item }));
       }
       if (Array.isArray(data.jaime) && data.jaime.length) {
         setLikedItems((prev) => mergeUnique(prev, data.jaime));
-        await Promise.all(data.jaime.map((item) => sharedFetch("/like-add", { method: "POST", body: { item } }).catch(() => {})));
+        await sendEach(data.jaime, "/like-add", (item) => ({ item }));
       }
       if (Array.isArray(data.jaimepas) && data.jaimepas.length) {
         setDislikedItems((prev) => mergeUnique(prev, data.jaimepas));
-        await Promise.all(data.jaimepas.map((item) => sharedFetch("/dislike-add", { method: "POST", body: { item } }).catch(() => {})));
+        await sendEach(data.jaimepas, "/dislike-add", (item) => ({ item }));
       }
       if (Array.isArray(data.foyer) && data.foyer.length) {
         setSharedFavorites((prev) => mergeUnique(prev, data.foyer));
-        await Promise.all(data.foyer.map((item) => sharedFetch("/favorite-add", { method: "POST", body: { item, by: whoAmI } }).catch(() => {})));
+        await sendEach(data.foyer, "/favorite-add", (item) => ({ item, by: whoAmI }));
       }
       if (Array.isArray(data.perso) && data.perso.length) {
         if (!whoAmI) { skippedPerso = true; }
         else {
           setFavorites((prev) => mergeUnique(prev, data.perso));
-          await Promise.all(data.perso.map((item) => sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item } }).catch(() => {})));
+          await sendEach(data.perso, "/perso-add", (item) => ({ email: whoAmI, item }));
         }
       }
 
@@ -1598,7 +1638,11 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               <button onClick={() => setSettingsOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>QUI ES-TU ?</label>
-            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>Sert uniquement à savoir qui notifier quand l'autre ajoute un titre à la sélection du foyer.</p>
+            <p className="text-xs mb-2" style={{ color: C.inkMuted }}>
+              {identityAuto
+                ? "Reconnu automatiquement d'après ta connexion Cloudflare Access — ta sélection perso te suit sur tous tes appareils, rien à choisir."
+                : "Identité non détectée : choisis-toi ci-dessous, sinon ta sélection perso reste invisible (elle n'est pas perdue pour autant)."}
+            </p>
             <div className="flex gap-2 mb-4">
               {KNOWN_PEOPLE.map((p) => (
                 <button key={p.email} onClick={() => chooseWhoAmI(p.email)} className="flex-1 rounded-lg py-2 text-sm font-medium"
