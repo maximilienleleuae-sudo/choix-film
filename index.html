@@ -291,8 +291,39 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     thumbsDown: <><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></>,
     tag: <><path d="M12.59 2.59 20 10v.01L10.01 20 2 12V4a2 2 0 0 1 2-2h8.59Z"/><circle cx="7.5" cy="7.5" r="1.3" fill={color}/></>,
     info: <><circle cx="12" cy="12" r="10"/><path d="M12 16v-5"/><path d="M12 8h.01"/></>,
+    check: <path d="M20 6 9 17l-5-5"/>,
   };
   return <svg {...common} className={name === "loader" ? "animate-spin" : ""}>{paths[name] || null}</svg>;
+}
+
+// Tiroir générique de sélection multiple (Plateforme, Pays, Classification) : liste de "options"
+// {value, label} avec coche, "selected" un tableau de values cochées, "onToggle(value)" bascule un
+// élément. Mutualisé plutôt que dupliqué 3 fois, sur le même modèle que le tiroir "Thème" existant.
+function FilterDrawer({ open, onClose, title, hint, options, selected, onToggle }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={onClose}>
+      <div className="w-full rounded-t-2xl p-5 overflow-y-auto" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "80vh" }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-display text-xl">{title}</h3>
+          <button onClick={onClose} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+        </div>
+        {hint && <p className="text-xs mb-3" style={{ color: C.inkMuted }}>{hint}</p>}
+        <div className="flex flex-wrap gap-1.5">
+          {options.map((opt) => {
+            const active = selected.includes(opt.value);
+            return (
+              <button key={opt.value} onClick={() => onToggle(opt.value)}
+                className="rounded-full pl-3 pr-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5"
+                style={{ background: active ? C.amber : C.bg, color: active ? "#1A1305" : C.ink, border: `1px solid ${active ? C.amber : C.border}` }}>
+                {opt.label} {active && <Icon name="check" size={12} color="#1A1305" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +351,17 @@ function CeSoir() {
   const [genreMap, setGenreMap] = useState({});
   const [genresLoaded, setGenresLoaded] = useState(false);
   const [providers, setProviders] = useState([]); // plateformes de streaming (France) via TMDB watch providers
-  const [activeProviderId, setActiveProviderId] = useState(null);
-  const [activeYear, setActiveYear] = useState(null);
-  const [activeCountry, setActiveCountry] = useState(null);
-  const [activeCertification, setActiveCertification] = useState(null);
+  // Plateforme / pays / classification : choix multiples (OR côté TMDB via "|", voir runDiscover).
+  // Année : "de"/"à" — un seul des deux renseigné = année exacte (comportement historique conservé
+  // comme cas particulier d'une plage), les deux = plage inclusive.
+  const [activeProviderIds, setActiveProviderIds] = useState([]);
+  const [activeYearFrom, setActiveYearFrom] = useState(null);
+  const [activeYearTo, setActiveYearTo] = useState(null);
+  const [activeCountries, setActiveCountries] = useState([]);
+  const [activeCertifications, setActiveCertifications] = useState([]);
+  const [providerDrawerOpen, setProviderDrawerOpen] = useState(false);
+  const [countryDrawerOpen, setCountryDrawerOpen] = useState(false);
+  const [certificationDrawerOpen, setCertificationDrawerOpen] = useState(false);
 
   const [tasteProfile, setTasteProfile] = useState(null);
   const [csvStatus, setCsvStatus] = useState("");
@@ -878,12 +916,12 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, certification = activeCertification, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerIds = activeProviderIds, originCountries = activeCountries, certifications = activeCertifications, yearFrom = activeYearFrom ?? activeYearTo ?? undefined, yearTo = activeYearTo ?? activeYearFrom ?? undefined, page = 1, append = false } = {}) => {
     setResultsSource("discover");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerId, originCountry, certification, yearFrom, yearTo };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerIds, originCountries, certifications, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       // include_adult est verrouillé au niveau de tmdbFetch (voir includeAdultPref) : pas besoin
@@ -900,11 +938,13 @@ function CeSoir() {
       // "|" = OU logique (voir commentaire genres ci-dessus) : un film qui matche un seul des
       // thèmes cumulés (LGBT+ et/ou mots-clés libres) doit ressortir, pas seulement s'il les a tous.
       if (keywordIds.length) params.with_keywords = keywordIds.join("|");
-      if (providerId) { params.with_watch_providers = String(providerId); params.watch_region = "FR"; }
-      if (originCountry) params.with_origin_country = originCountry;
+      // "|" = OU logique (choix multiple : un des éléments cochés suffit), même syntaxe que pour
+      // les genres — vérifié empiriquement sur with_origin_country et certification.
+      if (providerIds.length) { params.with_watch_providers = providerIds.join("|"); params.watch_region = "FR"; }
+      if (originCountries.length) params.with_origin_country = originCountries.join("|");
       // Correspondance exacte : "certification" (pas ".lte") ne remonte que les films classés
       // pile à ce niveau — un plafond rendrait le palier le plus élevé ("-18") quasi sans effet.
-      if (certification) { params.certification_country = "FR"; params.certification = certification; }
+      if (certifications.length) { params.certification_country = "FR"; params.certification = certifications.join("|"); }
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
@@ -918,13 +958,13 @@ function CeSoir() {
       // le pays, y compris des avertissements de plateforme (ex. Prime Video "18" sur un film
       // classé -16 en salle) — pas toujours fiable. On revérifie donc chaque résultat avec la
       // même logique que la fiche détail (priorité à la classification salle) avant affichage.
-      if (certification) {
+      if (certifications.length) {
         const kind = type === "movie" ? "movie" : "tv";
         const extra = kind === "movie" ? "release_dates" : "content_ratings";
         const verified = await Promise.all(items.map(async (it) => {
           try {
             const detail = await tmdbFetch(`/${kind}/${it.id}`, { append_to_response: extra });
-            return certForFR(detail, type) === certification ? it : null;
+            return certifications.includes(certForFR(detail, type)) ? it : null;
           } catch { return null; }
         }));
         items = verified.filter(Boolean);
@@ -946,7 +986,7 @@ function CeSoir() {
     } finally {
       if (append) setResultsLoadingMore(false); else setResultsLoading(false);
     }
-  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry, activeCertification, includeAdult]);
+  }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderIds, activeYearFrom, activeYearTo, activeCountries, activeCertifications, includeAdult]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -988,6 +1028,9 @@ function CeSoir() {
     fluxOpen && { key: "flux", close: () => setFluxOpen(false) },
     surpriseInfoOpen && { key: "surpriseInfo", close: () => setSurpriseInfoOpen(false) },
     keywordDrawerOpen && { key: "keyword", close: () => setKeywordDrawerOpen(false) },
+    providerDrawerOpen && { key: "providerDrawer", close: () => setProviderDrawerOpen(false) },
+    countryDrawerOpen && { key: "countryDrawer", close: () => setCountryDrawerOpen(false) },
+    certificationDrawerOpen && { key: "certificationDrawer", close: () => setCertificationDrawerOpen(false) },
     detailItem && { key: "detail", close: () => setDetailItem(null) },
     trailerOpenFor && { key: "trailer", close: () => setTrailerOpenFor(null) },
   ].filter(Boolean);
@@ -1156,8 +1199,16 @@ function CeSoir() {
       const filters = feed.filters || {};
       if (filters.genreIds?.length) items = items.filter((it) => genreIdsOf(it).some((g) => filters.genreIds.includes(g)));
       if (filters.minVote) items = items.filter((it) => (it.vote_average || 0) >= filters.minVote);
-      if (filters.yearFrom) items = items.filter((it) => (it.release_date || it.first_air_date || "").slice(0, 4) === String(filters.yearFrom));
-      if (filters.originCountry) items = items.filter((it) => (it.origin_country || []).includes(filters.originCountry));
+      if (filters.yearFrom || filters.yearTo) {
+        items = items.filter((it) => {
+          const y = Number((it.release_date || it.first_air_date || "").slice(0, 4));
+          if (!y) return false;
+          if (filters.yearFrom && y < filters.yearFrom) return false;
+          if (filters.yearTo && y > filters.yearTo) return false;
+          return true;
+        });
+      }
+      if (filters.originCountries?.length) items = items.filter((it) => (it.origin_country || []).some((c) => filters.originCountries.includes(c)));
       if (filters.sort) {
         const sortField = filters.sort.startsWith("vote_average") ? "vote_average" : filters.sort.startsWith("primary_release_date") ? "date" : "popularity";
         items = [...items].sort((a, b) => {
@@ -1166,7 +1217,7 @@ function CeSoir() {
           return (b.popularity || 0) - (a.popularity || 0);
         });
       }
-      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.originCountry;
+      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.yearTo || filters.originCountries?.length;
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -1310,7 +1361,7 @@ Contraintes :
   // Genre / note / tri / pays / année sont ensuite appliqués en post-filtrage côté client : l'API
   // /search de TMDB ne les accepte pas nativement (contrairement à /discover), donc c'est la seule
   // façon de les rendre cumulables avec une recherche par texte.
-  async function runClassicSearch({ page = 1, append = false, type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, originCountry = activeCountry, yearFrom = activeYear || undefined } = {}) {
+  async function runClassicSearch({ page = 1, append = false, type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, originCountries = activeCountries, yearFrom = activeYearFrom ?? activeYearTo ?? undefined, yearTo = activeYearTo ?? activeYearFrom ?? undefined } = {}) {
     const query = moodInput.trim();
     if (!query) return;
     setResultsSource("classic");
@@ -1319,7 +1370,10 @@ Contraintes :
       const kind = type === "movie" ? "movie" : "tv";
       const searchParams = { query, page: String(page) };
       // include_adult est verrouillé au niveau de tmdbFetch (voir includeAdultPref).
-      if (yearFrom) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
+      // L'API /search n'accepte qu'une année exacte, pas de plage — on ne la fixe donc côté TMDB
+      // que si "de" et "à" désignent la même année (cas "année unique"), sinon le post-filtrage
+      // ci-dessous (post-filtre, comme pour genre/pays/note) gère la vraie plage.
+      if (yearFrom && yearFrom === yearTo) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
       // Le flag "adult" de TMDB ne couvre que le porno pur au sens industrie — pas les mockbusters/
@@ -1354,15 +1408,24 @@ Contraintes :
       }
 
       items = items.filter((it) => !seenIds.has(`${kind}-${it.id}`) && !dislikedKeys.has(`${kind}-${it.id}`));
-      if (originCountry) items = items.filter((it) => (it.origin_country || []).includes(originCountry));
+      if (originCountries.length) items = items.filter((it) => (it.origin_country || []).some((c) => originCountries.includes(c)));
       // OR logique (un des genres suffit), comme pour la découverte — sinon presque plus aucun
       // résultat dès qu'on combine plusieurs genres.
       if (genreIds.length) items = items.filter((it) => (it.genre_ids || []).some((g) => genreIds.includes(g)));
       if (minVote) items = items.filter((it) => (it.vote_average || 0) >= minVote);
-      // Le paramètre d'année envoyé à TMDB ne filtre que la recherche par titre — la filmographie
-      // ajoutée pour une personne (acteur/réalisateur) n'en tient pas compte côté API, d'où ce
-      // post-filtrage explicite pour que l'année s'applique bien partout.
-      if (yearFrom) items = items.filter((it) => (it.release_date || it.first_air_date || "").slice(0, 4) === String(yearFrom));
+      // Le paramètre d'année envoyé à TMDB ne filtre que la recherche par titre (et seulement en
+      // année exacte) — la filmographie ajoutée pour une personne n'en tient pas compte côté API,
+      // et une vraie plage "de/à" n'est pas supportée nativement : d'où ce post-filtrage explicite,
+      // seule façon de faire respecter l'année/la plage partout.
+      if (yearFrom || yearTo) {
+        items = items.filter((it) => {
+          const y = Number((it.release_date || it.first_air_date || "").slice(0, 4));
+          if (!y) return false;
+          if (yearFrom && y < yearFrom) return false;
+          if (yearTo && y > yearTo) return false;
+          return true;
+        });
+      }
 
       const sortField = sort.startsWith("vote_average") ? "vote_average" : sort.startsWith("primary_release_date") ? "date" : "popularity";
       items.sort((a, b) => {
@@ -1400,7 +1463,7 @@ Contraintes :
     // chaque page d'un flux, donc incompatibles ici comme pour la recherche classique. Changer de
     // Films/Séries n'a pas de sens non plus au milieu d'un flux dont le média est fixé à sa
     // définition : on quitte alors le flux plutôt que de le filtrer.
-    const incompatibleWithFeed = "providerId" in overrides || "keywordIds" in overrides || "certification" in overrides;
+    const incompatibleWithFeed = "providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides;
 
     if ("type" in overrides && inFeed) {
       // Changer Films/Séries n'a pas de sens au milieu d'un flux dont le média est fixé à sa
@@ -1409,7 +1472,7 @@ Contraintes :
       lastFeedRef.current = null;
       runDiscover(overrides);
     } else if (inClassicSearch) {
-      if ("providerId" in overrides || "keywordIds" in overrides || "certification" in overrides) {
+      if ("providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides) {
         showToast("Ce filtre n'est pas compatible avec une recherche par titre/acteur — utilisable en mode Découverte.");
         return;
       }
@@ -1427,8 +1490,9 @@ Contraintes :
       const filters = {
         genreIds: activeGenreIds,
         minVote: minRating,
-        yearFrom: activeYear || undefined,
-        originCountry: activeCountry,
+        yearFrom: activeYearFrom ?? activeYearTo ?? undefined,
+        yearTo: activeYearTo ?? activeYearFrom ?? undefined,
+        originCountries: activeCountries,
         sort: sortBy,
         ...overrides,
       };
@@ -1458,7 +1522,7 @@ Contraintes :
         .map((it) => ({ ...it, media_type: kind }))
         .filter((it) => { if (seenIdsSet.has(it.id)) return false; seenIdsSet.add(it.id); return true; })
         .filter((it) => !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
-      if (activeCountry) items = items.filter((it) => (it.origin_country || []).includes(activeCountry));
+      if (activeCountries.length) items = items.filter((it) => (it.origin_country || []).some((c) => activeCountries.includes(c)));
       items.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
       setResultsPage(1);
@@ -1635,7 +1699,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
     setResultsLoading(true);
     setResultsError("");
     try {
-      const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || !!activeProviderId || !!activeYear || !!activeCountry || !!activeCertification;
+      const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0;
 
       // Genres du profil (à éviter en mode "sors des sentiers battus", sinon ce n'est plus une
       // découverte) et genres associés aux titres "j'aime pas" (à éviter tout court).
@@ -1816,6 +1880,23 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
     const next = activeGenreIds.includes(id) ? activeGenreIds.filter((g) => g !== id) : [...activeGenreIds, id];
     setActiveGenreIds(next);
     applyFilters({ genreIds: next });
+  }
+
+  // Choix multiples (Plateforme, Pays, Classification) : même logique de bascule que toggleGenre.
+  function toggleProvider(id) {
+    const next = activeProviderIds.includes(id) ? activeProviderIds.filter((p) => p !== id) : [...activeProviderIds, id];
+    setActiveProviderIds(next);
+    applyFilters({ providerIds: next });
+  }
+  function toggleCountry(code) {
+    const next = activeCountries.includes(code) ? activeCountries.filter((c) => c !== code) : [...activeCountries, code];
+    setActiveCountries(next);
+    applyFilters({ originCountries: next });
+  }
+  function toggleCertification(code) {
+    const next = activeCertifications.includes(code) ? activeCertifications.filter((c) => c !== code) : [...activeCertifications, code];
+    setActiveCertifications(next);
+    applyFilters({ certifications: next });
   }
 
   async function resetSeenAndFavorites() {
@@ -2026,27 +2107,29 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           <option value="primary_release_date.desc">Tri : Année</option>
         </select>
         {providers.length > 0 && (
-          <select value={activeProviderId ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveProviderId(v); applyFilters({ providerId: v }); }}
-            className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeProviderId ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeProviderId ? "#1A1305" : C.ink }}>
-            <option value="">Plateforme : Toutes</option>
-            {providers.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.provider_name}</option>)}
-          </select>
+          <button onClick={() => setProviderDrawerOpen(true)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium"
+            style={{ background: activeProviderIds.length ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeProviderIds.length ? "#1A1305" : C.ink }}>
+            {activeProviderIds.length ? `Plateforme (${activeProviderIds.length})` : "Plateforme : Toutes"}
+          </button>
         )}
-        <select value={activeYear ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYear(v); applyFilters({ yearFrom: v || undefined, yearTo: v || undefined }); }}
-          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYear ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYear ? "#1A1305" : C.ink }}>
-          <option value="">Année : Toutes</option>
+        <select value={activeYearFrom ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearFrom(v); applyFilters({ yearFrom: v ?? activeYearTo ?? undefined, yearTo: activeYearTo ?? v ?? undefined }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYearFrom ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYearFrom ? "#1A1305" : C.ink }}>
+          <option value="">Année de</option>
           {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
-        <select value={activeCountry ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCountry(v); applyFilters({ originCountry: v }); }}
-          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCountry ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCountry ? "#1A1305" : C.ink }}>
-          <option value="">Pays : Tous</option>
-          {COUNTRIES_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+        <select value={activeYearTo ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearTo(v); applyFilters({ yearTo: v ?? activeYearFrom ?? undefined, yearFrom: activeYearFrom ?? v ?? undefined }); }}
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYearTo ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYearTo ? "#1A1305" : C.ink }}>
+          <option value="">à</option>
+          {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
-        <select value={activeCertification ?? ""} onChange={(e) => { const v = e.target.value || null; setActiveCertification(v); applyFilters({ certification: v }); }}
-          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeCertification ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCertification ? "#1A1305" : C.ink }}>
-          <option value="">Classification : Toutes</option>
-          {CERTIFICATIONS_FR.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
-        </select>
+        <button onClick={() => setCountryDrawerOpen(true)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium"
+          style={{ background: activeCountries.length ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCountries.length ? "#1A1305" : C.ink }}>
+          {activeCountries.length ? `Pays (${activeCountries.length})` : "Pays : Tous"}
+        </button>
+        <button onClick={() => setCertificationDrawerOpen(true)} className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium"
+          style={{ background: activeCertifications.length ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCertifications.length ? "#1A1305" : C.ink }}>
+          {activeCertifications.length ? `Classification (${activeCertifications.length})` : "Classification : Toutes"}
+        </button>
         <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
           {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
             <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
@@ -2395,6 +2478,21 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           </div>
         </div>
       )}
+
+      <FilterDrawer open={providerDrawerOpen} onClose={() => setProviderDrawerOpen(false)} title="Plateforme"
+        hint="Choix multiples : un titre disponible sur au moins une des plateformes cochées ressort. Fonctionne en Découverte, pas en recherche par titre/acteur ni dans un flux."
+        options={providers.map((p) => ({ value: p.provider_id, label: p.provider_name }))}
+        selected={activeProviderIds} onToggle={toggleProvider} />
+
+      <FilterDrawer open={countryDrawerOpen} onClose={() => setCountryDrawerOpen(false)} title="Pays d'origine"
+        hint="Choix multiples : un titre originaire d'au moins un des pays cochés ressort."
+        options={COUNTRIES_FR.map(([code, label]) => ({ value: code, label }))}
+        selected={activeCountries} onToggle={toggleCountry} />
+
+      <FilterDrawer open={certificationDrawerOpen} onClose={() => setCertificationDrawerOpen(false)} title="Classification"
+        hint="Choix multiples : un titre classé exactement à l'un des paliers cochés ressort. Fonctionne en Découverte, pas en recherche par titre/acteur ni dans un flux."
+        options={CERTIFICATIONS_FR.map(([code, label]) => ({ value: code, label }))}
+        selected={activeCertifications} onToggle={toggleCertification} />
 
       {settingsOpen && (
         <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setSettingsOpen(false)}>
