@@ -1144,9 +1144,29 @@ function CeSoir() {
         data = raw.results ? raw : { ...raw, results: raw.items || [] };
       }
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      const items = (data.results || [])
+      let items = (data.results || [])
         .map((it) => ({ ...it, media_type: it.media_type === "tv" || it.media_type === "movie" ? it.media_type : media }))
         .filter((it) => !seenIds.has(`${it.media_type}-${it.id}`) && !dislikedKeys.has(`${it.media_type}-${it.id}`));
+
+      // Filtres genre / note / année / pays / tri appliqués côté client sur les résultats déjà
+      // récupérés (déjà présents sur chaque item, pas d'appel supplémentaire) — pour pouvoir
+      // affiner un flux sans le quitter. Plateforme/mots-clés/classification restent incompatibles
+      // avec un flux (nécessiteraient un appel détail par titre) : voir applyFilters, qui bloque
+      // ces cas avant même d'arriver ici.
+      const filters = feed.filters || {};
+      if (filters.genreIds?.length) items = items.filter((it) => genreIdsOf(it).some((g) => filters.genreIds.includes(g)));
+      if (filters.minVote) items = items.filter((it) => (it.vote_average || 0) >= filters.minVote);
+      if (filters.yearFrom) items = items.filter((it) => (it.release_date || it.first_air_date || "").slice(0, 4) === String(filters.yearFrom));
+      if (filters.originCountry) items = items.filter((it) => (it.origin_country || []).includes(filters.originCountry));
+      if (filters.sort) {
+        const sortField = filters.sort.startsWith("vote_average") ? "vote_average" : filters.sort.startsWith("primary_release_date") ? "date" : "popularity";
+        items = [...items].sort((a, b) => {
+          if (sortField === "vote_average") return (b.vote_average || 0) - (a.vote_average || 0);
+          if (sortField === "date") return (b.release_date || b.first_air_date || "").localeCompare(a.release_date || a.first_air_date || "");
+          return (b.popularity || 0) - (a.popularity || 0);
+        });
+      }
+      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.originCountry;
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -1156,7 +1176,9 @@ function CeSoir() {
         return [...prev, ...items.filter((it) => !already.has(`${it.media_type}-${it.id}`))];
       });
       if (!append) setCurrentIndex(0);
-      if (!append && !items.length) setResultsError("Ce flux ne renvoie rien de nouveau — tout est deja vu ou ecarte.");
+      if (!append && !items.length) {
+        setResultsError(hasFeedFilter ? "Aucun résultat pour ce flux avec ces filtres — élargis-les." : "Ce flux ne renvoie rien de nouveau — tout est deja vu ou ecarte.");
+      }
     } catch {
       if (!append) setResultsError("Impossible de charger ce flux (Worker/TMDB hors ligne ?).");
     }
@@ -1371,17 +1393,49 @@ Contraintes :
   // supporte pas (il faudrait un appel par résultat pour les vérifier un par un) : ils restent donc
   // réservés au mode Découverte.
   function applyFilters(overrides = {}) {
-    // Toucher un filtre sort du flux en cours : les criteres de la home reprennent la main.
-    setActiveFeed(null);
-    lastFeedRef.current = null;
     const inClassicSearch = resultsSource === "classic" && moodInput.trim();
-    if (inClassicSearch) {
+    const inFeed = resultsSource === "feed" && lastFeedRef.current;
+    // Plateforme, mots-clés et classification nécessiteraient un appel détail par titre pour être
+    // vérifiés (comme le fait runDiscover pour la classification) — trop coûteux à refaire à
+    // chaque page d'un flux, donc incompatibles ici comme pour la recherche classique. Changer de
+    // Films/Séries n'a pas de sens non plus au milieu d'un flux dont le média est fixé à sa
+    // définition : on quitte alors le flux plutôt que de le filtrer.
+    const incompatibleWithFeed = "providerId" in overrides || "keywordIds" in overrides || "certification" in overrides;
+
+    if ("type" in overrides && inFeed) {
+      // Changer Films/Séries n'a pas de sens au milieu d'un flux dont le média est fixé à sa
+      // définition : on quitte plutôt que d'afficher un toast pendant que le bouton bascule déjà.
+      setActiveFeed(null);
+      lastFeedRef.current = null;
+      runDiscover(overrides);
+    } else if (inClassicSearch) {
       if ("providerId" in overrides || "keywordIds" in overrides || "certification" in overrides) {
         showToast("Ce filtre n'est pas compatible avec une recherche par titre/acteur — utilisable en mode Découverte.");
         return;
       }
+      setActiveFeed(null);
+      lastFeedRef.current = null;
       runClassicSearch(overrides);
+    } else if (inFeed && incompatibleWithFeed) {
+      showToast("Ce filtre n'est pas compatible avec un flux — utilisable en mode Découverte.");
+    } else if (inFeed) {
+      // Filtre le flux en cours sans le quitter (voir runFeed) : genre / note / année / pays / tri
+      // se recalculent sur les résultats déjà récupérés. On reconstruit l'instantané complet des
+      // filtres actifs à chaque appel (comme runDiscover via ses valeurs par défaut) plutôt que de
+      // fusionner incrémentalement, car `overrides` ne porte que le champ qui vient de changer —
+      // les setters (setMinRating, etc.) n'ont pas encore mis à jour le state au moment de cet appel.
+      const filters = {
+        genreIds: activeGenreIds,
+        minVote: minRating,
+        yearFrom: activeYear || undefined,
+        originCountry: activeCountry,
+        sort: sortBy,
+        ...overrides,
+      };
+      runFeed({ feed: { ...lastFeedRef.current, filters }, page: 1, append: false });
     } else {
+      setActiveFeed(null);
+      lastFeedRef.current = null;
       runDiscover(overrides);
     }
   }
