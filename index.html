@@ -1176,33 +1176,39 @@ function CeSoir() {
     try {
       const type = item.media_type === "tv" ? "tv" : "movie";
       const year = (detail.release_date || detail.first_air_date || "").slice(0, 4);
-      const genreNames = (detail.genres || []).map((g) => g.name).filter(Boolean);
+      // On ne fournit a l'IA QUE des candidats reels tires de la fiche TMDB (genres/mots-cles/
+      // casting/realisateur de CE titre precis), et on lui demande de choisir parmi eux plutot que
+      // d'inventer du texte libre. Ca evite un aller-retour de recherche approximative ensuite
+      // (ex. un mot-cle invente comme "mariage toxique" qui ne matche aucun tag TMDB reel et ne
+      // renvoie donc rien) : chaque choix se resout directement en id TMDB fiable, deja en main.
+      const genreCandidates = (detail.genres || []).map((g) => ({ id: g.id, name: g.name })).filter((g) => g.name);
       const keywordList = type === "movie" ? detail.keywords?.keywords : detail.keywords?.results;
-      const keywordNames = (keywordList || []).map((k) => k.name).filter(Boolean).slice(0, 10);
-      const director = (detail.credits?.crew || []).find((c) => c.job === "Director")?.name;
-      const castNames = (detail.credits?.cast || []).slice(0, 5).map((c) => c.name);
+      const keywordCandidates = (keywordList || []).map((k) => ({ id: k.id, name: k.name })).filter((k) => k.name).slice(0, 12);
+      const castCandidates = (detail.credits?.cast || []).slice(0, 8).map((c) => ({ id: c.id, name: c.name })).filter((c) => c.name);
+      const directorEntry = (detail.credits?.crew || []).find((c) => c.job === "Director");
       const refRating = detail.vote_average ? detail.vote_average.toFixed(1) : null;
 
       const system = `Tu dois analyser ce titre précis pour identifier son ambiance réelle — pas seulement son genre TMDB.
 
 Titre : ${item.title} (${year || "?"})
-Genres TMDB : ${genreNames.join(", ") || "inconnus"}
 Synopsis : ${detail.overview || "non disponible"}
-Mots-clés TMDB : ${keywordNames.join(", ") || "aucun"}
-Réalisateur : ${director || "inconnu"}
-Casting principal : ${castNames.join(", ") || "inconnu"}
 Note TMDB : ${refRating || "inconnue"}
+Réalisateur : ${directorEntry?.name || "inconnu"}
 
-Identifie ce qui rend CE titre distinctif (ton, univers, structure narrative, thèmes) et propose des critères TMDB pour trouver des films/séries qui partagent vraiment cette ambiance précise — pas juste "même genre, autre titre".
+Genres TMDB disponibles pour ce titre (choisis uniquement parmi ceux-ci) : ${genreCandidates.map((g) => g.name).join(", ") || "aucun"}
+Mots-clés TMDB réels de ce titre (choisis uniquement parmi ceux-ci, n'en invente aucun) : ${keywordCandidates.map((k) => k.name).join(", ") || "aucun"}
+Casting principal (choisis uniquement parmi ceux-ci) : ${castCandidates.map((c) => c.name).join(", ") || "aucun"}
+
+Identifie ce qui rend CE titre distinctif (ton, univers, structure narrative, thèmes) et sélectionne, PARMI LES LISTES CI-DESSUS UNIQUEMENT, les critères les plus représentatifs de son ambiance précise pour trouver des films/séries qui la partagent vraiment — pas juste "même genre, autre titre".
 
 Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
-{"genres":[string],"keywords":[string],"cast_names":[string],"director_name":string|null,"year_from":number|null,"year_to":number|null,"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"}
+{"genres":[string],"keywords":[string],"cast_names":[string],"use_director":boolean,"year_from":number|null,"year_to":number|null,"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"}
 
 Contraintes :
-- genres uniquement dans cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}
-- keywords : 2 à 4 thèmes précis (ex. "vengeance", "twist final"), pas de mots génériques
-- cast_names : uniquement des ACTEURS (jamais le réalisateur) si un acteur précis est central au style de ce titre, sinon []
-- director_name : le réalisateur, UNIQUEMENT si son style personnel (pas juste ce film précis) est vraiment central à l'ambiance recherchée, sinon null — à utiliser avec parcimonie, ça réduit beaucoup le nombre de résultats
+- genres : reprends tels quels 1 à 2 noms venant STRICTEMENT de la liste "Genres TMDB disponibles" ci-dessus
+- keywords : reprends tels quels 2 à 4 noms venant STRICTEMENT de la liste "Mots-clés TMDB réels" ci-dessus — les plus distinctifs de l'ambiance, jamais un mot inventé
+- cast_names : reprends tels quels 0 à 2 noms venant STRICTEMENT de la liste "Casting principal" ci-dessus, uniquement si un acteur précis est central au style de ce titre, sinon []
+- use_director : true UNIQUEMENT si le style personnel du réalisateur (pas juste ce film) est vraiment central à l'ambiance recherchée, sinon false — à utiliser avec parcimonie, ça réduit beaucoup le nombre de résultats
 - min_rating : cohérent avec la qualité du titre de référence${refRating ? ` (${refRating})` : ""}`;
 
       const res = await fetch(WORKER_URL, {
@@ -1214,20 +1220,16 @@ Contraintes :
       const text = (data.content || []).map((b) => b.text || "").join("").replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(text);
 
-      const genreIds = (parsed.genres || []).map((n) => genreMap[n.toLowerCase()]?.[type]).filter(Boolean);
-      const fallbackGenreIds = genreIds.length ? genreIds : (detail.genres || []).map((g) => g.id);
-
-      const [keywordIds, castIds, crewIds] = await Promise.all([
-        Promise.all((parsed.keywords || []).slice(0, 4).map((name) =>
-          tmdbFetch("/search/keyword", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
-        )).then((ids) => ids.filter(Boolean)),
-        Promise.all((parsed.cast_names || []).slice(0, 3).map((name) =>
-          tmdbFetch("/search/person", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
-        )).then((ids) => ids.filter(Boolean)),
-        parsed.director_name
-          ? tmdbFetch("/search/person", { query: parsed.director_name }).then((r) => [r.results?.[0]?.id].filter(Boolean)).catch(() => [])
-          : Promise.resolve([]),
-      ]);
+      // Resolution directe par nom -> id a partir des candidats reels ci-dessus, sans nouvel appel
+      // TMDB : fiable a 100% (les ids viennent deja de la fiche de CE titre), et instantane.
+      const byName = (list) => (names) => (names || [])
+        .map((n) => list.find((c) => c.name.toLowerCase() === String(n).toLowerCase())?.id)
+        .filter(Boolean);
+      const genreIds = byName(genreCandidates)(parsed.genres);
+      const fallbackGenreIds = genreIds.length ? genreIds : genreCandidates.map((g) => g.id);
+      const keywordIds = byName(keywordCandidates)(parsed.keywords);
+      const castIds = byName(castCandidates)(parsed.cast_names);
+      const crewIds = parsed.use_director && directorEntry ? [directorEntry.id] : [];
 
       // Le titre de depart ne doit jamais se retrouver dans ses propres suggestions.
       const excludeSeed = (prev) => prev.filter((it) => !(it.id === item.id && it.media_type === type));
