@@ -1297,7 +1297,23 @@ Contraintes :
       if (yearFrom) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      let items = (data.results || []).map((it) => ({ ...it, media_type: kind }));
+      // Le flag "adult" de TMDB ne couvre que le porno pur au sens industrie — pas les mockbusters/
+      // séries d'exploitation quasi inconnues (ex. franchise "Girls Gone Wild", parodies de titres
+      // connus) qui remontent sinon dans une recherche par titre même avec le contenu adulte
+      // désactivé. On les écarte via des signaux objectifs plutôt qu'une liste de mots : "video:true"
+      // (TMDB distingue déjà ces clips/concerts/compilations d'un vrai film/série) ou une absence
+      // totale de trace (0 vote ET pas de synopsis, quasi toujours du remplissage). Jamais appliqué
+      // à une correspondance exacte du titre recherché, pour ne jamais cacher ce que l'utilisateur
+      // cherche vraiment.
+      const queryNorm = query.trim().toLowerCase();
+      const isNoise = (it) => {
+        const t = (it.title || it.name || "").toLowerCase();
+        if (t === queryNorm) return false;
+        if (it.video) return true;
+        if (!it.vote_count && !it.overview) return true;
+        return false;
+      };
+      let items = (data.results || []).filter((it) => !isNoise(it)).map((it) => ({ ...it, media_type: kind }));
 
       if (page === 1) {
         try {
