@@ -20,3 +20,6 @@ Replay/
 install/
 
 royal-smoke-0062/
+
+# Identifiants IPTV (script scripts/iptv-sync.js) — jamais commit
+iptv-credentials.local.json

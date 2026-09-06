@@ -136,6 +136,30 @@ function certForFR(detail, mediaType) {
   return ratings.reduce((best, c) => (CERT_ORDER.indexOf(c) > CERT_ORDER.indexOf(best) ? c : best), ratings[0]);
 }
 
+// Rapprochement approximatif titre TMDB <-> nom de fichier catalogue IPTV. Les noms IPTV sont
+// formatés de façon très variable selon le fournisseur ("Titre (2023)", "Titre 2023 4K [VF]"...),
+// donc on normalise (accents, casse, tags entre parenthèses/crochets) et on tolère un des deux
+// noms préfixe de l'autre plutôt que d'exiger une égalité stricte.
+function normalizeForIptvMatch(s) {
+  return (s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\(\d{4}\)/g, "")
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+function findIptvMatch(catalog, title, mediaType) {
+  const list = catalog && (mediaType === "movie" ? catalog.movies : catalog.series);
+  if (!Array.isArray(list)) return null;
+  const norm = normalizeForIptvMatch(title);
+  if (!norm) return null;
+  return list.find((it) => {
+    const n = normalizeForIptvMatch(it.name);
+    return n === norm || n.startsWith(`${norm} `) || norm.startsWith(`${n} `);
+  }) || null;
+}
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='#1B1E2B'/><text x='200' y='300' fill='#8B8A99' font-family='sans-serif' font-size='20' text-anchor='middle'>Pas d'affiche</text></svg>`
 );
@@ -353,6 +377,7 @@ function CeSoir() {
   // Flux de decouverte : catalogue de sources decrit dans flux/index.json, servi par Pages a cote
   // de l'app. Ajouter un flux = editer ce fichier et pousser, aucun code a toucher.
   const [feedsManifest, setFeedsManifest] = useState(null);
+  const [iptvCatalog, setIptvCatalog] = useState(null);
   const [feedsError, setFeedsError] = useState("");
   const [fluxOpen, setFluxOpen] = useState(false);
   const [activeFeed, setActiveFeed] = useState(null);
@@ -982,6 +1007,21 @@ function CeSoir() {
       } catch {
         setFeedsError("Catalogue de flux introuvable (flux/index.json).");
       }
+    })();
+  }, []);
+
+  // Catalogue IPTV (optionnel) : instantané régénéré manuellement depuis un PC (via
+  // scripts/iptv-sync.js, voir ce fichier) car l'API du fournisseur IPTV bloque les requêtes
+  // venant de Cloudflare Workers — impossible d'interroger ça en direct depuis l'app. Fichier
+  // absent tant qu'il n'a jamais été généré : échec silencieux, la fonctionnalité reste juste masquée.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("./flux/iptv-catalog.json", { cache: "no-cache" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && (Array.isArray(data.movies) || Array.isArray(data.series))) setIptvCatalog(data);
+      } catch { /* pas de catalogue IPTV : pas grave, badge simplement absent */ }
     })();
   }, []);
 
@@ -2317,6 +2357,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               const isSharedFavD = sharedFavorites.some((f) => f.key === detailKey);
               const certCode = certForFR(d, detailItem.media_type);
               const certLabel = certCode && CERTIFICATION_LABELS_FR[certCode];
+              const iptvMatch = findIptvMatch(iptvCatalog, title, detailItem.media_type);
               return (
                 <>
                   <div className="relative" style={{ aspectRatio: "16/9", background: "#000" }}>
@@ -2342,13 +2383,18 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                   <div className="p-5">
                     <p className="font-mono text-[11px] tracking-wide mb-1" style={{ color: C.teal }}>{year || "—"} · {detailItem.media_type === "movie" ? "FILM" : "SÉRIE"}{d.runtime ? ` · ${d.runtime} min` : ""}{d.number_of_seasons ? ` · ${d.number_of_seasons} saison${d.number_of_seasons > 1 ? "s" : ""}` : ""}</p>
                     <h2 className="font-display text-2xl leading-tight mb-2">{title}</h2>
-                    <div className="flex items-center gap-1 mb-3">
+                    <div className="flex items-center flex-wrap gap-1 mb-3">
                       <Icon name="star" size={14} color={C.amber} fill={C.amber} />
                       <span className="text-sm font-medium" style={{ color: C.amber }}>{d.vote_average?.toFixed(1) ?? "—"}</span>
                       <span className="text-xs ml-1" style={{ color: C.inkMuted }}>({d.vote_count ?? 0} votes)</span>
                       {certLabel && (
                         <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ml-2" style={{ background: "#3A1414", border: `1px solid ${C.danger}`, color: "#FF9B9B" }}>
                           <Icon name="tag" size={10} color="#FF9B9B" /> {certLabel}
+                        </span>
+                      )}
+                      {iptvMatch && (
+                        <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ml-2" style={{ background: "#12321F", border: `1px solid #2E7D4F`, color: "#7EE0A6" }} title={`${iptvMatch.name}${iptvCatalog?.updated ? ` — catalogue du ${iptvCatalog.updated}` : ""}`}>
+                          <Icon name="tv" size={10} color="#7EE0A6" /> Disponible sur ton IPTV
                         </span>
                       )}
                     </div>
