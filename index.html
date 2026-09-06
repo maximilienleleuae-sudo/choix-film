@@ -142,22 +142,30 @@ function certForFR(detail, mediaType) {
 // noms préfixe de l'autre plutôt que d'exiger une égalité stricte.
 function normalizeForIptvMatch(s) {
   return (s || "")
+    // Tags de langue/qualite en PREFIXE, tres frequents chez ce type de fournisseur
+    // ("|FR|", "|FR-4K|"...) - a retirer avant le reste, sinon rien ne matche jamais.
+    .replace(/^(\s*\|[^|]*\|\s*)+/, "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
-    .replace(/\(\d{4}\)/g, "")
-    .replace(/\[[^\]]*\]/g, "")
+    // Annotations entre parentheses/crochets ou qu'elles soient dans le nom (annee, MULTI, VF...).
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+    .trim()
+    .replace(/\s+/g, " ");
 }
 function findIptvMatch(catalog, title, mediaType) {
   const list = catalog && (mediaType === "movie" ? catalog.movies : catalog.series);
   if (!Array.isArray(list)) return null;
   const norm = normalizeForIptvMatch(title);
   if (!norm) return null;
-  return list.find((it) => {
-    const n = normalizeForIptvMatch(it.name);
-    return n === norm || n.startsWith(`${norm} `) || norm.startsWith(`${n} `);
-  }) || null;
+  // Egalite stricte uniquement (pas de prefixe/inclusion) : sur un catalogue de plusieurs
+  // dizaines de milliers d'entrees, un simple "commence par" fait remonter de faux positifs
+  // dangereux — ex. chercher "It" matchait un obscur special Charlie Brown dont le titre commence
+  // par "It's...", et "The Godfather" matchait "The Godfather: Part III" (le mauvais volet). Mieux
+  // vaut rater un match legitime (ex. un volet catalogue sous un intitule different) que montrer
+  // un badge "disponible" qui pointe en realite vers un autre film.
+  return list.find((it) => normalizeForIptvMatch(it.name) === norm) || null;
 }
 
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
@@ -378,6 +386,7 @@ function CeSoir() {
   // de l'app. Ajouter un flux = editer ce fichier et pousser, aucun code a toucher.
   const [feedsManifest, setFeedsManifest] = useState(null);
   const [iptvCatalog, setIptvCatalog] = useState(null);
+  const [iptvMatchForDetail, setIptvMatchForDetail] = useState(null);
   const [feedsError, setFeedsError] = useState("");
   const [fluxOpen, setFluxOpen] = useState(false);
   const [activeFeed, setActiveFeed] = useState(null);
@@ -1024,6 +1033,16 @@ function CeSoir() {
       } catch { /* pas de catalogue IPTV : pas grave, badge simplement absent */ }
     })();
   }, []);
+
+  // Rapprochement calculé à part (pas inline dans le rendu de la fiche détail) : le catalogue
+  // fait plusieurs dizaines de milliers d'entrées, le refaire à chaque re-render de la fiche
+  // (like/dislike/vu, etc.) coûterait cher pour rien — on ne le recalcule que quand la fiche ou
+  // le catalogue changent vraiment.
+  useEffect(() => {
+    if (!detailItem || !detailData || detailData.error || !iptvCatalog) { setIptvMatchForDetail(null); return; }
+    const title = detailData.title || detailData.name;
+    setIptvMatchForDetail(findIptvMatch(iptvCatalog, title, detailItem.media_type));
+  }, [detailItem, detailData, iptvCatalog]);
 
   // Execute un flux du catalogue. Volontairement calque sur runDiscover : memes filtres deja-vu /
   // j'aime-pas, meme pagination, meme etat "results" — donc les vues grille, liste et swipe et
@@ -2357,7 +2376,7 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
               const isSharedFavD = sharedFavorites.some((f) => f.key === detailKey);
               const certCode = certForFR(d, detailItem.media_type);
               const certLabel = certCode && CERTIFICATION_LABELS_FR[certCode];
-              const iptvMatch = findIptvMatch(iptvCatalog, title, detailItem.media_type);
+              const iptvMatch = iptvMatchForDetail;
               return (
                 <>
                   <div className="relative" style={{ aspectRatio: "16/9", background: "#000" }}>
