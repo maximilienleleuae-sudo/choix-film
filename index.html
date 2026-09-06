@@ -212,8 +212,20 @@ function tmdbCacheTtlMs(path) {
   if (/^\/search\/(movie|tv|multi)/.test(path)) return 1000 * 60 * 10;
   return 1000 * 30;
 }
+// Réglage "contenu adulte" (voir toggle dans Réglages) : verrouillé ici, au niveau le plus bas de
+// tous les appels TMDB, plutôt que laissé à la charge de chaque fonction d'appel — ainsi aucune
+// recherche/flux, présent ou futur, ne peut par erreur oublier de le respecter. Synchronisé depuis
+// le composant (voir l'effet sur includeAdult) dès le chargement du réglage sauvegardé et à chaque
+// bascule du toggle.
+let includeAdultPref = false;
 async function tmdbFetch(path, params) {
-  const url = tmdbUrl(path, params);
+  // Seuls /search/* et /discover/* acceptent ce paramètre côté TMDB — on le fixe explicitement
+  // (jamais laissé à "non précisé") dès que le chemin le permet, indépendamment de ce que
+  // l'appelant a pu passer, pour qu'un seul endroit fasse foi.
+  const finalParams = /^\/(search|discover)\//.test(path)
+    ? { ...params, include_adult: includeAdultPref ? "true" : "false" }
+    : params;
+  const url = tmdbUrl(path, finalParams);
   const cached = tmdbMemCache.get(url);
   if (cached && cached.expires > Date.now()) return cached.data;
   const data = await fetch(url).then(safeJson);
@@ -418,6 +430,12 @@ function CeSoir() {
       setBooted(true);
     })();
   }, []);
+
+  // Synchronise le réglage "contenu adulte" vers tmdbFetch (verrou central, voir includeAdultPref) :
+  // au chargement du réglage sauvegardé ci-dessus comme à chaque bascule du toggle dans Réglages.
+  // tmdbFetch est une fonction module-level (partagée, hors composant) donc ne peut pas lire le
+  // state React directement — cet effet est le seul pont entre les deux.
+  useEffect(() => { includeAdultPref = includeAdult; }, [includeAdult]);
 
   // État partagé "foyer" : déjà vu + sélection commune, stockés côté Worker (Cloudflare KV).
   // Chargé une fois au démarrage ; fusionné avec le cache local pour un affichage instantané
@@ -866,7 +884,8 @@ function CeSoir() {
     lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerId, originCountry, certification, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
-      if (includeAdult) params.include_adult = "true";
+      // include_adult est verrouillé au niveau de tmdbFetch (voir includeAdultPref) : pas besoin
+      // de le fixer ici, une seule source de vérité pour tous les appels /discover et /search.
       // "|" = OU logique côté TMDB (un des genres suffit) — "," ferait un ET (tous les genres à
       // la fois), ce qui ne renvoie quasiment jamais de résultat dès qu'on combine plusieurs genres.
       if (genreIds.length) params.with_genres = genreIds.join("|");
@@ -1274,7 +1293,7 @@ Contraintes :
     try {
       const kind = type === "movie" ? "movie" : "tv";
       const searchParams = { query, page: String(page) };
-      if (includeAdult) searchParams.include_adult = "true";
+      // include_adult est verrouillé au niveau de tmdbFetch (voir includeAdultPref).
       if (yearFrom) searchParams[kind === "movie" ? "primary_release_year" : "first_air_date_year"] = String(yearFrom);
       const data = await tmdbFetch(`/search/${kind}`, searchParams);
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
