@@ -858,12 +858,12 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, certification = activeCertification, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerId = activeProviderId, originCountry = activeCountry, certification = activeCertification, yearFrom = activeYear || undefined, yearTo = activeYear || undefined, page = 1, append = false } = {}) => {
     setResultsSource("discover");
     if (append) setResultsLoadingMore(true); else { setResultsLoading(true); setResultsError(""); }
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, keywordIds, providerId, originCountry, certification, yearFrom, yearTo };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerId, originCountry, certification, yearFrom, yearTo };
     try {
       const params = { sort_by: sort, "vote_count.gte": "30", page: String(page) };
       if (includeAdult) params.include_adult = "true";
@@ -872,6 +872,10 @@ function CeSoir() {
       if (genreIds.length) params.with_genres = genreIds.join("|");
       if (minVote) params["vote_average.gte"] = String(minVote);
       if (castIds.length) params.with_cast = castIds.join(",");
+      // with_crew (réalisateur/équipe) n'existe que côté discover/movie — filtre par filmographie
+      // en tant que membre d'équipe (utile pour cibler le style d'un réalisateur précis), distinct
+      // de with_cast qui ne matche que les rôles d'acteur.
+      if (type === "movie" && crewIds.length) params.with_crew = crewIds.join(",");
       // "|" = OU logique (voir commentaire genres ci-dessus) : un film qui matche un seul des
       // thèmes cumulés (LGBT+ et/ou mots-clés libres) doit ressortir, pas seulement s'il les a tous.
       if (keywordIds.length) params.with_keywords = keywordIds.join("|");
@@ -914,8 +918,13 @@ function CeSoir() {
       });
       if (!append) setCurrentIndex(0);
       if (!append && !items.length) setResultsError("Aucun résultat pour ces critères — élargis un peu les filtres.");
-    } catch { if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?)."); }
-    if (append) setResultsLoadingMore(false); else setResultsLoading(false);
+      return items.length;
+    } catch {
+      if (!append) setResultsError("Impossible de charger les suggestions (Worker/TMDB hors ligne ?).");
+      return 0;
+    } finally {
+      if (append) setResultsLoadingMore(false); else setResultsLoading(false);
+    }
   }, [mediaType, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderId, activeYear, activeCountry, activeCertification, includeAdult]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
@@ -1187,12 +1196,13 @@ Note TMDB : ${refRating || "inconnue"}
 Identifie ce qui rend CE titre distinctif (ton, univers, structure narrative, thèmes) et propose des critères TMDB pour trouver des films/séries qui partagent vraiment cette ambiance précise — pas juste "même genre, autre titre".
 
 Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
-{"genres":[string],"keywords":[string],"cast_names":[string],"year_from":number|null,"year_to":number|null,"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"}
+{"genres":[string],"keywords":[string],"cast_names":[string],"director_name":string|null,"year_from":number|null,"year_to":number|null,"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"}
 
 Contraintes :
 - genres uniquement dans cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}
 - keywords : 2 à 4 thèmes précis (ex. "vengeance", "twist final"), pas de mots génériques
-- cast_names : uniquement si un réalisateur ou acteur précis est central au style de ce titre, sinon []
+- cast_names : uniquement des ACTEURS (jamais le réalisateur) si un acteur précis est central au style de ce titre, sinon []
+- director_name : le réalisateur, UNIQUEMENT si son style personnel (pas juste ce film précis) est vraiment central à l'ambiance recherchée, sinon null — à utiliser avec parcimonie, ça réduit beaucoup le nombre de résultats
 - min_rating : cohérent avec la qualité du titre de référence${refRating ? ` (${refRating})` : ""}`;
 
       const res = await fetch(WORKER_URL, {
@@ -1205,28 +1215,42 @@ Contraintes :
       const parsed = JSON.parse(text);
 
       const genreIds = (parsed.genres || []).map((n) => genreMap[n.toLowerCase()]?.[type]).filter(Boolean);
+      const fallbackGenreIds = genreIds.length ? genreIds : (detail.genres || []).map((g) => g.id);
 
-      const [keywordIds, castIds] = await Promise.all([
+      const [keywordIds, castIds, crewIds] = await Promise.all([
         Promise.all((parsed.keywords || []).slice(0, 4).map((name) =>
           tmdbFetch("/search/keyword", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
         )).then((ids) => ids.filter(Boolean)),
         Promise.all((parsed.cast_names || []).slice(0, 3).map((name) =>
           tmdbFetch("/search/person", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
         )).then((ids) => ids.filter(Boolean)),
+        parsed.director_name
+          ? tmdbFetch("/search/person", { query: parsed.director_name }).then((r) => [r.results?.[0]?.id].filter(Boolean)).catch(() => [])
+          : Promise.resolve([]),
       ]);
 
-      await runDiscover({
+      // Le titre de depart ne doit jamais se retrouver dans ses propres suggestions.
+      const excludeSeed = (prev) => prev.filter((it) => !(it.id === item.id && it.media_type === type));
+
+      let count = await runDiscover({
         type,
-        genreIds: genreIds.length ? genreIds : (detail.genres || []).map((g) => g.id),
+        genreIds: fallbackGenreIds,
         minVote: parsed.min_rating || 0,
         sort: parsed.sort || "popularity.desc",
         castIds,
+        crewIds,
         keywordIds,
         yearFrom: parsed.year_from,
         yearTo: parsed.year_to,
       });
-      // Le titre de depart ne doit pas se retrouver dans ses propres suggestions.
-      setResults((prev) => prev.filter((it) => !(it.id === item.id && it.media_type === type)));
+      setResults(excludeSeed);
+
+      // Des criteres trop precis (mot-cle rare, realisateur pointu...) peuvent ne renvoyer aucun
+      // resultat : filet de securite, on retente juste avec les genres avant d'abandonner.
+      if (!count) {
+        count = await runDiscover({ type, genreIds: fallbackGenreIds, minVote: 0, sort: "popularity.desc" });
+        setResults(excludeSeed);
+      }
     } catch (e) {
       setResultsError("Je n'ai pas réussi à analyser ce titre — vérifie l'URL du Worker ou réessaie.");
       setResultsLoading(false);
