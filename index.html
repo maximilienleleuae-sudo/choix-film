@@ -1591,11 +1591,12 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
 
       const system = `Tu choisis des critères de recherche TMDB pour surprendre l'utilisateur avec une proposition de ${mediaType === "tv" ? "série" : "film"} ce soir.
 Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
-{"genres":[string],"year_from":number|null,"year_to":number|null,"cast_names":[string],"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"|"primary_release_date.desc"}
+{"genres":[string],"year_from":number|null,"year_to":number|null,"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"|"primary_release_date.desc"}
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
+Ne cible jamais un acteur ou réalisateur précis : ça réduirait la sélection à sa seule filmographie et casserait l'effet de surprise — reste sur des critères de genre/époque/note, pas de personne.
 
 ${hasActiveFilter
-  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste casting/tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${customKeywords.length ? `, thèmes = ${customKeywords.map((k) => k.name).join(", ")}` : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}${activeCertificationName ? `, classification maximum = ${activeCertificationName}` : ""}.`
+  ? `Des filtres sont déjà actifs à l'écran (prioritaires, respecte-les strictement, affine juste l'année/la note/le tri) : ${activeGenreNames.length ? `genres = ${activeGenreNames.join(", ")}` : "aucun genre imposé"}${minRating ? `, note minimale = ${minRating}` : ""}${lgbtActive ? ", thème LGBT+" : ""}${customKeywords.length ? `, thèmes = ${customKeywords.map((k) => k.name).join(", ")}` : ""}${activeProviderName ? `, disponible sur ${activeProviderName} uniquement` : ""}${activeYear ? `, année = ${activeYear}` : ""}${activeCountryName ? `, pays d'origine = ${activeCountryName}` : ""}${activeCertificationName ? `, classification maximum = ${activeCertificationName}` : ""}.`
   : "Aucun filtre actif à l'écran : base-toi uniquement sur les goûts ci-dessous."}
 ${likedTitles.length ? `Le foyer aime : ${likedTitles.join(", ")}.` : "Aucun goût \"j'aime\" connu pour l'instant."}
 ${dislikedTitles.length ? `Le foyer n'aime PAS, à éviter absolument (genres et registre similaires) : ${dislikedTitles.join(", ")}.` : ""}
@@ -1616,14 +1617,6 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
       const genreNames = hasActiveFilter && activeGenreNames.length ? activeGenreNames : (parsed.genres || []);
       const genreIds = genreNames.map((n) => genreMap[n.toLowerCase()]?.[mediaType]).filter(Boolean);
 
-      let castIds = [];
-      if (parsed.cast_names?.length) {
-        const found = await Promise.all(parsed.cast_names.slice(0, 3).map((name) =>
-          tmdbFetch("/search/person", { query: name }).then((r) => r.results?.[0]?.id).catch(() => null)
-        ));
-        castIds = found.filter(Boolean);
-      }
-
       lastSurpriseGenresRef.current = [...lastSurpriseGenresRef.current, genreNames].slice(-3);
 
       await runDiscover({
@@ -1631,7 +1624,6 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
         genreIds: genreIds.length ? genreIds : preferredGenreIds,
         minVote: hasActiveFilter && minRating ? minRating : (parsed.min_rating || 6.5),
         sort: parsed.sort || "popularity.desc",
-        castIds,
         yearFrom: activeYear || parsed.year_from,
         yearTo: activeYear || parsed.year_to,
       });
