@@ -1055,7 +1055,16 @@ function CeSoir() {
     try {
       const media = feed.media === "tv" ? "tv" : "movie";
       let data;
-      if (feed.type === "reco-likes") {
+      if (feed.type === "similar-to") {
+        // Recommandations TMDB pour ce titre precis (pas un tirage au hasard comme reco-likes) :
+        // lancee depuis le bouton "Plus comme ça" d'une fiche detail. Repli sur /similar si TMDB
+        // ne renvoie aucune recommandation (frequent pour un titre peu vote/confidentiel) plutot
+        // que d'afficher un flux vide du premier coup.
+        data = await tmdbFetch(`/${media}/${feed.seedId}/recommendations`, { page: String(page) });
+        if (!(data.results || []).length && page === 1) {
+          data = await tmdbFetch(`/${media}/${feed.seedId}/similar`, { page: String(page) });
+        }
+      } else if (feed.type === "reco-likes") {
         // Pas de chemin fixe : on part d'un titre pris au hasard dans "J'aime" et on demande a
         // TMDB ses recommandations. Le flux n'a donc de sens que si la liste n'est pas vide.
         const pool = likedItems.filter((f) => f.media_type === "movie" || f.media_type === "tv");
@@ -1133,6 +1142,17 @@ function CeSoir() {
     setActiveFeed(null);
     lastFeedRef.current = null;
     applyFilters({});
+  }
+
+  function moreLikeThis(item) {
+    setDetailItem(null);
+    openFeed({
+      id: `similar-${item.media_type}-${item.id}`,
+      label: `Comme ${item.title}`,
+      type: "similar-to",
+      media: item.media_type,
+      seedId: item.id,
+    });
   }
 
   // Recherche "classique" : recherche TMDB par titre (/search), sans interprétation IA — pour
@@ -2480,6 +2500,11 @@ Il est actuellement ${momentOfDay()} : adapte le ton si pertinent (plus léger/c
                         <Icon name="home" size={16} color={isSharedFavD ? "#0A1614" : C.teal} fill={isSharedFavD ? "#0A1614" : "none"} /> {isSharedFavD ? "En foyer ✓" : "Foyer"}
                       </button>
                     </div>
+                    <button onClick={() => moreLikeThis({ id: d.id, media_type: detailItem.media_type, title })}
+                      className="w-full mt-2 rounded-full py-2.5 text-sm font-medium flex items-center justify-center gap-2"
+                      style={{ background: C.bg, color: C.teal, border: `1px solid ${C.border}` }}>
+                      <Icon name="shuffle" size={15} color={C.teal} /> Plus comme {title}
+                    </button>
                   </div>
                 </>
               );
