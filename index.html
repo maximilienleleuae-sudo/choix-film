@@ -379,7 +379,6 @@ function CeSoir() {
   const fetchingPostersRef = useRef(new Set());
   const autoLoadedRef = useRef(false);
   const autoSuggestedRef = useRef(false);
-  const lastSurpriseStrategiesRef = useRef([]); // 2 dernières approches "Surprends-moi" tirées, pour ne pas répéter
 
   const [moodInput, setMoodInput] = useState("");
   const [searchMode, setSearchMode] = useState("classic"); // "ai" (langage naturel) | "classic" (recherche par titre) — classique par défaut
@@ -441,6 +440,7 @@ function CeSoir() {
   const [feedsError, setFeedsError] = useState("");
   const [fluxOpen, setFluxOpen] = useState(false);
   const [surpriseInfoOpen, setSurpriseInfoOpen] = useState(false);
+  const [surpriseMenuOpen, setSurpriseMenuOpen] = useState(false);
   const [activeFeed, setActiveFeed] = useState(null);
   const [favDrawerTab, setFavDrawerTab] = useState("perso");
 
@@ -1027,6 +1027,7 @@ function CeSoir() {
     settingsOpen && { key: "settings", close: () => setSettingsOpen(false) },
     fluxOpen && { key: "flux", close: () => setFluxOpen(false) },
     surpriseInfoOpen && { key: "surpriseInfo", close: () => setSurpriseInfoOpen(false) },
+    surpriseMenuOpen && { key: "surpriseMenu", close: () => setSurpriseMenuOpen(false) },
     keywordDrawerOpen && { key: "keyword", close: () => setKeywordDrawerOpen(false) },
     providerDrawerOpen && { key: "providerDrawer", close: () => setProviderDrawerOpen(false) },
     countryDrawerOpen && { key: "countryDrawer", close: () => setCountryDrawerOpen(false) },
@@ -1687,78 +1688,83 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
     setMoodLoading(false);
   }
 
-  // "Surprends-moi" : moteur déterministe à 4 approches tirées au hasard, sans appel IA (voir
-  // claude/surprends-moi-refonte.md dans le projet pour l'historique — l'ancienne version confiait
-  // le choix des critères TMDB à un LLM à chaque clic, ce qui convergeait presque toujours vers les
-  // mêmes genres dominants du profil (= l'écran d'accueil) et a produit deux bugs réels où un
-  // acteur/réalisateur halluciné en filtre réduisait la sélection à sa seule filmographie.
-  // Les filtres déjà actifs à l'écran restent toujours prioritaires (repris via les valeurs par
-  // défaut de runDiscover) ; seules les approches compatibles avec eux sont tirables, et jamais
-  // deux fois de suite la même.
-  async function surpriseMe() {
+  // "Surprends-moi" : 4 approches déterministes, sans appel IA (voir claude/surprends-moi-refonte.md
+  // dans le projet pour l'historique — l'ancienne version confiait le choix des critères TMDB à un
+  // LLM à chaque clic, ce qui convergeait presque toujours vers les mêmes genres dominants du profil
+  // (= l'écran d'accueil) et a produit deux bugs réels où un acteur/réalisateur halluciné en filtre
+  // réduisait la sélection à sa seule filmographie. Choisies explicitement via 4 icônes plutôt que
+  // tirées au hasard : chaque icône correspond toujours à la même approche, grisée si incompatible
+  // avec les filtres déjà actifs à l'écran (repris via les valeurs par défaut de runDiscover).
+  function getSurpriseStrategies() {
+    const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0;
+
+    // Genres du profil (à éviter en mode "sors des sentiers battus", sinon ce n'est plus une
+    // découverte) et genres associés aux titres "j'aime pas" (à éviter tout court).
+    const dislikedGenreIds = new Set();
+    dislikedItems.forEach((f) => (f.genreIds || []).forEach((id) => dislikedGenreIds.add(id)));
+    const offbeatCandidates = Object.values(genreMap)
+      .map((ids) => ids[mediaType])
+      .filter((id) => id && !preferredGenreIds.includes(id) && !dislikedGenreIds.has(id));
+
+    const canRecoLikes = !hasActiveFilter && likedItems.some((f) => f.media_type === mediaType);
+    const canOffbeat = !hasActiveFilter && offbeatCandidates.length > 0;
+
+    return [
+      // Pépite bien notée : tri par note plutôt que popularité, pour sortir des blockbusters.
+      {
+        key: "pepite", icon: "star", label: "Pépite bien notée", eligible: true,
+        run: () => runDiscover({ genreIds: activeGenreIds.length ? activeGenreIds : preferredGenreIds, minVote: Math.max(minRating || 0, 7), sort: "vote_average.desc" }),
+      },
+      // Comme un truc que tu aimes : recommandations TMDB basées sur un titre "J'aime" au hasard —
+      // sérendipité ancrée sur un vrai goût plutôt que sur un genre générique. Implémenté ici (et
+      // non via le flux "reco-likes" du tiroir) pour respecter l'onglet Films/Séries en cours et
+      // ne pas laisser une bannière de flux active après un simple tirage ponctuel.
+      {
+        key: "reco-likes", icon: "heart", label: "Comme un truc que tu aimes", eligible: canRecoLikes,
+        run: async () => {
+          const pool = likedItems.filter((f) => f.media_type === mediaType);
+          const seed = pool[Math.floor(Math.random() * pool.length)];
+          try {
+            const data = await tmdbFetch(`/${mediaType}/${seed.id}/recommendations`, { page: "1" });
+            const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
+            const items = (data.results || [])
+              .map((it) => ({ ...it, media_type: mediaType }))
+              .filter((it) => it.id !== seed.id && !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
+            setResultsSource("discover");
+            setResults(items);
+            setResultsPage(1);
+            setResultsHasMore(false); // tirage ponctuel : "charger plus" n'aurait pas de sens ici
+            setCurrentIndex(0);
+            if (!items.length) setResultsError(`Pas assez de recommandations pour "${seed.title}" — réessaie.`);
+          } finally {
+            setResultsLoading(false);
+          }
+        },
+      },
+      // Sors des sentiers battus : un genre hors du profil habituel et non détesté, pour une
+      // vraie découverte plutôt qu'une variation sur les goûts déjà connus.
+      {
+        key: "offbeat", icon: "shuffle", label: "Sors des sentiers battus", eligible: canOffbeat,
+        run: () => runDiscover({ genreIds: [offbeatCandidates[Math.floor(Math.random() * offbeatCandidates.length)]], minVote: 6, sort: "popularity.desc" }),
+      },
+      // Autour de tes goûts : le comportement historique (genres préférés/actifs, popularité).
+      {
+        key: "profil", icon: "sparkles", label: "Autour de tes goûts", eligible: true,
+        run: () => runDiscover({ genreIds: activeGenreIds.length ? activeGenreIds : preferredGenreIds, minVote: hasActiveFilter && minRating ? minRating : 6.5, sort: "popularity.desc" }),
+      },
+    ];
+  }
+
+  async function runSurpriseStrategy(key) {
+    const strategy = getSurpriseStrategies().find((s) => s.key === key);
+    if (!strategy || !strategy.eligible) return;
+    setSurpriseMenuOpen(false);
     setResultsLoading(true);
     setResultsError("");
     try {
-      const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0;
-
-      // Genres du profil (à éviter en mode "sors des sentiers battus", sinon ce n'est plus une
-      // découverte) et genres associés aux titres "j'aime pas" (à éviter tout court).
-      const dislikedGenreIds = new Set();
-      dislikedItems.forEach((f) => (f.genreIds || []).forEach((id) => dislikedGenreIds.add(id)));
-      const offbeatCandidates = Object.values(genreMap)
-        .map((ids) => ids[mediaType])
-        .filter((id) => id && !preferredGenreIds.includes(id) && !dislikedGenreIds.has(id));
-
-      const canRecoLikes = !hasActiveFilter && likedItems.some((f) => f.media_type === mediaType);
-      const canOffbeat = !hasActiveFilter && offbeatCandidates.length > 0;
-
-      const strategies = [
-        // Pépite bien notée : tri par note plutôt que popularité, pour sortir des blockbusters.
-        { key: "pepite", run: () => runDiscover({ genreIds: activeGenreIds.length ? activeGenreIds : preferredGenreIds, minVote: Math.max(minRating || 0, 7), sort: "vote_average.desc" }) },
-        // Comme un truc que tu aimes : recommandations TMDB basées sur un titre "J'aime" au hasard —
-        // sérendipité ancrée sur un vrai goût plutôt que sur un genre générique. Implémenté ici (et
-        // non via le flux "reco-likes" du tiroir) pour respecter l'onglet Films/Séries en cours et
-        // ne pas laisser une bannière de flux active après un simple tirage ponctuel.
-        canRecoLikes && {
-          key: "reco-likes",
-          run: async () => {
-            const pool = likedItems.filter((f) => f.media_type === mediaType);
-            const seed = pool[Math.floor(Math.random() * pool.length)];
-            try {
-              const data = await tmdbFetch(`/${mediaType}/${seed.id}/recommendations`, { page: "1" });
-              const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-              const items = (data.results || [])
-                .map((it) => ({ ...it, media_type: mediaType }))
-                .filter((it) => it.id !== seed.id && !seenIds.has(`${mediaType}-${it.id}`) && !dislikedKeys.has(`${mediaType}-${it.id}`));
-              setResultsSource("discover");
-              setResults(items);
-              setResultsPage(1);
-              setResultsHasMore(false); // tirage ponctuel : "charger plus" n'aurait pas de sens ici
-              setCurrentIndex(0);
-              if (!items.length) setResultsError(`Pas assez de recommandations pour "${seed.title}" — réessaie.`);
-            } finally {
-              setResultsLoading(false);
-            }
-          },
-        },
-        // Sors des sentiers battus : un genre hors du profil habituel et non détesté, pour une
-        // vraie découverte plutôt qu'une variation sur les goûts déjà connus.
-        canOffbeat && { key: "offbeat", run: () => runDiscover({ genreIds: [offbeatCandidates[Math.floor(Math.random() * offbeatCandidates.length)]], minVote: 6, sort: "popularity.desc" }) },
-        // Autour de tes goûts : le comportement historique (genres préférés/actifs, popularité).
-        { key: "profil", run: () => runDiscover({ genreIds: activeGenreIds.length ? activeGenreIds : preferredGenreIds, minVote: hasActiveFilter && minRating ? minRating : 6.5, sort: "popularity.desc" }) },
-      ].filter(Boolean);
-
-      // Jamais deux fois de suite la même approche, sauf si une seule est disponible (ex. filtres
-      // actifs qui excluent "reco-likes" et "offbeat").
-      const recentKeys = new Set(lastSurpriseStrategiesRef.current);
-      const pool = strategies.filter((s) => !recentKeys.has(s.key));
-      const candidates = pool.length ? pool : strategies;
-      const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-      lastSurpriseStrategiesRef.current = [...lastSurpriseStrategiesRef.current, chosen.key].slice(-2);
-
-      await chosen.run();
+      await strategy.run();
     } catch (e) {
-      setResultsError("Je n'ai pas réussi à te surprendre — réessaie.");
+      setResultsError("Je n'ai pas réussi à te proposer quelque chose — réessaie.");
       setResultsLoading(false);
     }
   }
@@ -2304,14 +2310,33 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       </main>
 
       <div className="fixed left-1/2 flex items-center gap-2" style={{ bottom: 84, transform: "translateX(-50%)" }}>
-        <button onClick={surpriseMe} disabled={resultsLoading} className="rounded-full px-5 py-3 text-sm font-semibold flex items-center gap-2 shadow-lg"
-          style={{ background: C.amber, color: "#1A1305" }}>
-          <Icon name={resultsLoading ? "loader" : "shuffle"} size={16} /> Surprends-moi
-        </button>
-        <button onClick={() => setSurpriseInfoOpen(true)} aria-label="Comment fonctionne Surprends-moi ?" className="p-2.5 rounded-full shadow-lg"
-          style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
-          <Icon name="info" size={16} color={C.inkMuted} />
-        </button>
+        {!surpriseMenuOpen && (
+          <>
+            <button onClick={() => setSurpriseMenuOpen(true)} disabled={resultsLoading}
+              className="rounded-full px-5 py-3 text-sm font-semibold flex items-center gap-2 shadow-lg whitespace-nowrap"
+              style={{ background: C.amber, color: "#1A1305" }}>
+              <Icon name={resultsLoading ? "loader" : "shuffle"} size={16} /> Surprends-moi
+            </button>
+            <button onClick={() => setSurpriseInfoOpen(true)} aria-label="Comment fonctionne Surprends-moi ?" className="p-2.5 rounded-full shadow-lg shrink-0"
+              style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+              <Icon name="info" size={16} color={C.inkMuted} />
+            </button>
+          </>
+        )}
+        {surpriseMenuOpen && (
+          <div className="flex items-center gap-1 rounded-full p-1.5 shadow-lg" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+            {getSurpriseStrategies().map((s) => (
+              <button key={s.key} onClick={() => runSurpriseStrategy(s.key)} disabled={resultsLoading || !s.eligible}
+                aria-label={s.label} title={s.label} className="p-2.5 rounded-full shrink-0"
+                style={{ background: C.bg, opacity: !s.eligible ? 0.3 : 1 }}>
+                <Icon name={resultsLoading ? "loader" : s.icon} size={16} color={C.amber} fill={s.icon === "star" ? C.amber : "none"} />
+              </button>
+            ))}
+            <button onClick={() => setSurpriseMenuOpen(false)} aria-label="Fermer" className="p-2.5 rounded-full shrink-0">
+              <Icon name="x" size={14} color={C.inkMuted} />
+            </button>
+          </div>
+        )}
       </div>
 
       {surpriseInfoOpen && (
@@ -2322,7 +2347,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
               <button onClick={() => setSurpriseInfoOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
             <p className="text-sm mb-4" style={{ color: C.inkMuted }}>
-              À chaque clic, une de ces 4 approches est tirée au hasard (jamais deux fois de suite la même), pour éviter de toujours retomber sur les mêmes titres populaires.
+              Le bouton ouvre 4 icônes, une par approche — à toi de choisir, pour éviter de toujours retomber sur les mêmes titres populaires. Une icône grisée est incompatible avec les filtres actifs à l'écran.
             </p>
             <div className="space-y-3 mb-2">
               {[
@@ -2343,7 +2368,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
               ))}
             </div>
             <p className="text-xs" style={{ color: C.inkMuted }}>
-              Si des filtres sont déjà actifs à l'écran (genre, plateforme, année...), ils sont toujours respectés — seules les approches compatibles avec eux sont tirées.
+              Si des filtres sont déjà actifs à l'écran (genre, plateforme, année...), ils sont toujours respectés — seules les approches compatibles avec eux restent cliquables.
             </p>
           </div>
         </div>
@@ -2794,6 +2819,31 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       </div>
                     )}
                     <p className="text-sm leading-snug mb-4" style={{ color: C.inkMuted }}>{d.overview || "Synopsis non disponible."}</p>
+                    {(() => {
+                      // Films : le job "Director" dans l'équipe technique. Séries : pas de "Director"
+                      // au niveau de la série (seulement par épisode) — created_by (le·s créateur·s)
+                      // est l'équivalent pertinent ici. Cliquable vers sa filmographie, comme le casting.
+                      const directors = detailItem.media_type === "movie"
+                        ? (d.credits?.crew || []).filter((c) => c.job === "Director")
+                        : (d.created_by || []);
+                      if (!directors.length) return null;
+                      const label = detailItem.media_type === "movie"
+                        ? (directors.length > 1 ? "RÉALISATEURS" : "RÉALISATEUR")
+                        : (directors.length > 1 ? "CRÉATEURS" : "CRÉATEUR");
+                      return (
+                        <div className="mb-4">
+                          <p className="text-xs font-mono mb-1.5" style={{ color: C.inkMuted }}>{label}</p>
+                          <p className="text-sm" style={{ color: C.ink }}>
+                            {directors.map((p, i) => (
+                              <React.Fragment key={p.id}>
+                                <button onClick={() => searchByPersonId(p.id, p.name)} className="underline underline-offset-2" style={{ color: C.ink }}>{p.name}</button>
+                                {i < directors.length - 1 ? ", " : ""}
+                              </React.Fragment>
+                            ))}
+                          </p>
+                        </div>
+                      );
+                    })()}
                     {cast.length > 0 && (
                       <div className="mb-4">
                         <p className="text-xs font-mono mb-1.5" style={{ color: C.inkMuted }}>CASTING</p>
