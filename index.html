@@ -241,6 +241,13 @@ async function sharedFetch(path, { method = "GET", body } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   }).then(safeJson);
 }
+// Menu "Tri :" de la barre de filtres -> tri d'affichage équivalent (voir viewSort).
+function viewSortFor(sort) {
+  const s = String(sort || "");
+  if (s.startsWith("vote_average")) return { key: "note", dir: "desc" };
+  if (s.startsWith("primary_release_date")) return { key: "date", dir: "desc" };
+  return { key: "default", dir: "desc" };
+}
 function yearOf(item) { const d = item.release_date || item.first_air_date; return d ? d.slice(0, 4) : "—"; }
 function momentOfDay() {
   const h = new Date().getHours();
@@ -402,7 +409,25 @@ function CeSoir() {
   const [keywordSearchBusy, setKeywordSearchBusy] = useState(false);
   const keywordDebounceRef = useRef(null);
 
-  const [results, setResults] = useState([]);
+  const [rawResults, setResults] = useState([]);
+  // Tri d'affichage appliqué à TOUS les résultats chargés (recherche, IA, flux, filtres cumulés) :
+  // "default" = ordre d'origine ; "note" / "date" avec sens desc (↓) ou asc (↑). Les valeurs
+  // manquantes (note 0 sans vote, date inconnue) restent toujours en fin de liste.
+  const [viewSort, setViewSort] = useState({ key: "default", dir: "desc" });
+  const results = useMemo(() => {
+    if (viewSort.key === "default") return rawResults;
+    const dir = viewSort.dir === "asc" ? 1 : -1;
+    const val = viewSort.key === "note"
+      ? (it) => (it.vote_average && it.vote_count !== 0 ? it.vote_average : null)
+      : (it) => it.release_date || it.first_air_date || null;
+    return [...rawResults].sort((a, b) => {
+      const x = val(a), y = val(b);
+      if (x === null && y === null) return 0;
+      if (x === null) return 1;
+      if (y === null) return -1;
+      return (x < y ? -1 : x > y ? 1 : 0) * dir || (b.popularity || 0) - (a.popularity || 0);
+    });
+  }, [rawResults, viewSort]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsLoadingMore, setResultsLoadingMore] = useState(false);
   const [resultsPage, setResultsPage] = useState(1);
@@ -1737,6 +1762,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       setActiveGenreIds(genreIds);
       setMinRating(parsed.min_rating || 0);
       setSortBy(parsed.sort || "popularity.desc");
+      setViewSort(viewSortFor(parsed.sort));
       // Pays et années déduits par l'IA : appliqués ET reflétés dans la barre de filtres, sinon un
       // filtre modifié ensuite les ferait disparaître sans que l'utilisateur comprenne pourquoi.
       const countries = [...new Set((parsed.countries || []).map((c) => String(c).toUpperCase()).filter((c) => COUNTRIES_FR.some(([code]) => code === c)))];
@@ -2172,7 +2198,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: minRating >= 7 ? C.amber : C.bgCard, color: minRating >= 7 ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="star" size={12} fill={minRating >= 7 ? "#1A1305" : "none"} /> 7+
         </button>
-        <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); applyFilters({ sort: e.target.value }); }}
+        <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); setViewSort(viewSortFor(e.target.value)); applyFilters({ sort: e.target.value }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }}>
           <option value="popularity.desc">Tri : Popularité</option>
           <option value="vote_average.desc">Tri : Note</option>
@@ -2220,6 +2246,23 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
             {activeFeed.description && <p className="text-[11px] truncate" style={{ color: C.inkMuted }}>{activeFeed.description}</p>}
           </div>
           <button onClick={closeFeed} aria-label="Quitter le flux" className="p-1 shrink-0"><Icon name="x" size={15} color={C.inkMuted} /></button>
+        </div>
+      )}
+
+      {!resultsLoading && results.length > 0 && (
+        <div className="px-5 pt-1 pb-1 flex items-center gap-2 overflow-x-auto scrollbar-none text-xs">
+          <span className="shrink-0" style={{ color: C.inkMuted }}>Trier les résultats</span>
+          {[["default", "Origine"], ["note", "Note"], ["date", "Date"]].map(([k, label]) => {
+            const active = viewSort.key === k;
+            return (
+              <button key={k} className="shrink-0 rounded-full px-3 py-1.5 font-medium"
+                onClick={() => { setViewSort((v) => k === "default" ? { key: "default", dir: "desc" } : v.key === k ? { key: k, dir: v.dir === "desc" ? "asc" : "desc" } : { key: k, dir: "desc" }); setCurrentIndex(0); }}
+                style={{ background: active ? C.amber : C.bgCard, color: active ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+                {label}{active && k !== "default" ? (viewSort.dir === "desc" ? " ↓" : " ↑") : ""}
+              </button>
+            );
+          })}
+          <span className="shrink-0" style={{ color: C.inkMuted }}>{results.length} titres chargés</span>
         </div>
       )}
 
