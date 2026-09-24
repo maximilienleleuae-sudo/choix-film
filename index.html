@@ -2622,11 +2622,13 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
         selected={activeCertifications} onToggle={toggleCertification} />
 
       {settingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setSettingsOpen(false)}>
-          <div className="w-full rounded-t-2xl p-5" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}` }} onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
+        <div className="fixed inset-0 z-50 flex items-end pt-6" style={{ background: "#000000a0" }} onClick={() => setSettingsOpen(false)}>
+          {/* Hauteur limitée à l'écran (max-h-full) + défilement interne : sur mobile la popup dépassait
+              en haut et le bouton Fermer devenait inaccessible. En-tête collant = Fermer toujours visible. */}
+          <div className="w-full max-h-full overflow-y-auto overscroll-contain rounded-t-2xl p-5" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}` }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4 sticky top-0 z-10 -mt-5 pt-5 pb-3" style={{ background: C.bgCard }}>
               <h3 className="font-display text-xl">Réglages</h3>
-              <button onClick={() => setSettingsOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+              <button onClick={() => setSettingsOpen(false)} aria-label="Fermer" className="p-2 -mr-2"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
             <label className="text-xs font-mono block mb-1.5" style={{ color: C.inkMuted }}>QUI ES-TU ?</label>
             <p className="text-xs mb-2" style={{ color: C.inkMuted }}>
