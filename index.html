@@ -876,6 +876,14 @@ function CeSoir() {
     });
     return out;
   }
+  // Bascule Films <-> Séries depuis les chips : Thriller (film) devient Mystère (série) ; au retour,
+  // Mystère redevient Thriller (Mystère n'a pas de chip, il resterait sinon un filtre invisible).
+  function mapGenresOnSwitch(ids, to) {
+    const mapped = mapGenreIds(ids, to);
+    if (to !== "movie") return mapped;
+    const thriller = genreIdFor("thriller", "movie");
+    return [...new Set(mapped.map((id) => (id === 9648 && thriller ? thriller : id)))];
+  }
 
   // Catégories disponibles dans l'historique déjà enrichi (posters chargés = genres connus).
   const historyGenreOptions = useMemo(() => {
@@ -1699,8 +1707,9 @@ Contraintes :
 
       const system = `Tu transformes une envie exprimée en langage naturel (en français) en critères de recherche TMDB.
 Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, au format exact :
-{"type":"movie"|"tv","genres":[string],"year_from":number|null,"year_to":number|null,"cast_names":[string],"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"|"primary_release_date.desc"}
+{"type":"movie"|"tv","genres":[string],"countries":[string],"year_from":number|null,"year_to":number|null,"cast_names":[string],"min_rating":number|null,"sort":"popularity.desc"|"vote_average.desc"|"primary_release_date.desc"}
 Les genres doivent venir uniquement de cette liste : ${MOVIE_GENRE_NAMES_FR.join(", ")}.
+"countries" : codes de pays d'origine de la production quand l'utilisateur précise une nationalité ou un pays (ex. "coréen" -> ["KR"], "français" -> ["FR"]), uniquement parmi : ${COUNTRIES_FR.map(([code, name]) => `${code}=${name}`).join(", ")}. Sinon [].
 "récent" veut dire année de début = ${new Date().getFullYear() - 3}. "type" vaut "tv" si l'utilisateur mentionne une série, sinon "movie".${likedTitles.length ? `
 Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'envie exprimée est vague ou ne précise pas de genre, laisse-toi influencer par ces goûts connus pour choisir les genres les plus pertinents parmi la liste autorisée.` : ""}`;
 
@@ -1728,8 +1737,14 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       setActiveGenreIds(genreIds);
       setMinRating(parsed.min_rating || 0);
       setSortBy(parsed.sort || "popularity.desc");
+      // Pays et années déduits par l'IA : appliqués ET reflétés dans la barre de filtres, sinon un
+      // filtre modifié ensuite les ferait disparaître sans que l'utilisateur comprenne pourquoi.
+      const countries = [...new Set((parsed.countries || []).map((c) => String(c).toUpperCase()).filter((c) => COUNTRIES_FR.some(([code]) => code === c)))];
+      setActiveCountries(countries);
+      setActiveYearFrom(parsed.year_from || null);
+      setActiveYearTo(parsed.year_to || null);
 
-      const aiParams = { type, genreIds, minVote: parsed.min_rating || 0, sort: parsed.sort || "popularity.desc", castIds, yearFrom: parsed.year_from, yearTo: parsed.year_to };
+      const aiParams = { type, genreIds, minVote: parsed.min_rating || 0, sort: parsed.sort || "popularity.desc", castIds, originCountries: countries, yearFrom: parsed.year_from ?? null, yearTo: parsed.year_to ?? null };
       const aiCount = await runDiscover(aiParams);
       // Le cumul strict des genres proposés par l'IA peut ne rien renvoyer : on retente en "OU".
       if (!aiCount && genreIds.length > 1) await runDiscover({ ...aiParams, genreOr: true });
@@ -2127,12 +2142,12 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       </div>
 
       <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
-        <button onClick={() => { const g = mapGenreIds(activeGenreIds, "movie"); setMediaType("movie"); setActiveGenreIds(g); applyFilters({ type: "movie", genreIds: g }); }}
+        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "movie"); setMediaType("movie"); setActiveGenreIds(g); applyFilters({ type: "movie", genreIds: g }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "movie" ? C.amber : C.bgCard, color: mediaType === "movie" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="film" size={13} /> Films
         </button>
-        <button onClick={() => { const g = mapGenreIds(activeGenreIds, "tv"); setMediaType("tv"); setActiveGenreIds(g); applyFilters({ type: "tv", genreIds: g }); }}
+        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "tv"); setMediaType("tv"); setActiveGenreIds(g); applyFilters({ type: "tv", genreIds: g }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "tv" ? C.amber : C.bgCard, color: mediaType === "tv" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="tv" size={13} /> Séries
