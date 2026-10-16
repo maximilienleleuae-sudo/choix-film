@@ -451,6 +451,11 @@ function CeSoir() {
   const [keywordSuggestions, setKeywordSuggestions] = useState([]);
   const [keywordSearchBusy, setKeywordSearchBusy] = useState(false);
   const keywordDebounceRef = useRef(null);
+  // Jeton anti-réponse périmée du tiroir Thème + caches (session) des traductions FR -> EN et du
+  // nombre de films par mot-clé, pour ne pas refaire ces appels à chaque frappe.
+  const keywordReqRef = useRef(0);
+  const keywordTranslateCacheRef = useRef(new Map());
+  const keywordCountCacheRef = useRef(new Map());
 
   const [rawResults, setResults] = useState([]);
   // Tri d'affichage appliqué à TOUS les résultats chargés (recherche, IA, flux, filtres cumulés) :
@@ -1730,22 +1735,84 @@ Contraintes :
     return ids;
   }
 
-  // Recherche TMDB de mots-clés en temps réel (debounce 350ms) pour le tiroir Thème — on ne
-  // résout jamais un mot-clé "à l'aveugle" comme pour LGBT+ : l'utilisateur choisit lui-même
-  // dans les suggestions, car plusieurs mots-clés proches peuvent correspondre à sa saisie.
+  // Les mots-clés TMDB sont quasi tous en anglais : une saisie française ("amitié", "survie")
+  // tombait sur des mots-clés FR fantômes rattachés à 0 film. On traduit donc la saisie en 1 à 3
+  // mots-clés anglais (Claude Haiku, mis en cache), on cherche à la fois la saisie brute et ses
+  // traductions, puis on compte les films de chaque suggestion pour le type courant (Films /
+  // Séries) : les mots-clés vides sont masqués et les plus fournis remontent en tête.
+  async function translateKeywordQuery(q) {
+    const key = q.toLowerCase();
+    const cache = keywordTranslateCacheRef.current;
+    if (cache.has(key)) return cache.get(key);
+    let terms = [];
+    try {
+      const cached = await storageGet(`kw-tr:${key}`);
+      if (cached) terms = JSON.parse(cached);
+      else {
+        const res = await fetch(WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-haiku-4-5",
+            max_tokens: 100,
+            system: "Tu convertis un thème de film saisi par l'utilisateur (souvent en français) en 1 à 3 mots-clés anglais au format de la base TMDB (minuscules, termes courts et courants : \"friendship\", \"time travel\", \"heist\", \"survival\"). Réponds UNIQUEMENT par un tableau JSON de chaînes, sans aucun texte autour.",
+            messages: [{ role: "user", content: q }],
+          }),
+        });
+        const data = await res.json();
+        const text = (data.content || []).map((b) => b.text || "").join("").replace(/```json|```/g, "").trim();
+        const parsed = JSON.parse(text);
+        terms = Array.isArray(parsed) ? parsed.filter((t) => typeof t === "string" && t.trim()).slice(0, 3) : [];
+        storageSet(`kw-tr:${key}`, JSON.stringify(terms));
+      }
+    } catch { terms = []; } // traduction indisponible : on garde au moins la recherche brute
+    cache.set(key, terms);
+    return terms;
+  }
+
+  async function keywordFilmCount(id, type) {
+    const key = `${type}-${id}`;
+    const cache = keywordCountCacheRef.current;
+    if (cache.has(key)) return cache.get(key);
+    let n = 0;
+    try {
+      // Même seuil de votes que la découverte (tri popularité) : le nombre affiché correspond à
+      // ce que le filtre remontera réellement.
+      const r = await tmdbFetch(`/discover/${type === "tv" ? "tv" : "movie"}`, { with_keywords: String(id), "vote_count.gte": "30" });
+      n = r.total_results || 0;
+    } catch { n = -1; } // inconnu : on n'écarte pas la suggestion pour une simple erreur réseau
+    cache.set(key, n);
+    return n;
+  }
+
   function onKeywordQueryChange(value) {
     setKeywordQuery(value);
     clearTimeout(keywordDebounceRef.current);
     const q = value.trim();
+    const seq = ++keywordReqRef.current;
     if (q.length < 2) { setKeywordSuggestions([]); setKeywordSearchBusy(false); return; }
     setKeywordSearchBusy(true);
     keywordDebounceRef.current = setTimeout(async () => {
       try {
-        const r = await tmdbFetch("/search/keyword", { query: q });
-        setKeywordSuggestions((r.results || []).slice(0, 8));
-      } catch { setKeywordSuggestions([]); }
-      setKeywordSearchBusy(false);
-    }, 350);
+        const [raw, terms] = await Promise.all([
+          tmdbFetch("/search/keyword", { query: q }).catch(() => ({ results: [] })),
+          translateKeywordQuery(q),
+        ]);
+        const translated = await Promise.all(
+          terms.filter((t) => t.toLowerCase() !== q.toLowerCase())
+            .map((t) => tmdbFetch("/search/keyword", { query: t }).then((r) => (r.results || []).slice(0, 4)).catch(() => []))
+        );
+        // Traductions d'abord (plus fiables), puis la saisie brute ; dédoublonnage par id.
+        const seen = new Set();
+        const candidates = [...translated.flat(), ...(raw.results || []).slice(0, 6)]
+          .filter((k) => !seen.has(k.id) && seen.add(k.id))
+          .slice(0, 12);
+        const withCount = await Promise.all(candidates.map(async (k) => ({ ...k, count: await keywordFilmCount(k.id, mediaType) })));
+        if (seq !== keywordReqRef.current) return; // saisie modifiée entre-temps
+        setKeywordSuggestions(withCount.filter((k) => k.count !== 0).sort((a, b) => b.count - a.count).slice(0, 8));
+      } catch { if (seq === keywordReqRef.current) setKeywordSuggestions([]); }
+      if (seq === keywordReqRef.current) setKeywordSearchBusy(false);
+    }, 450);
   }
 
   function addCustomKeyword(kw) {
@@ -2665,10 +2732,10 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
               <button onClick={() => setKeywordDrawerOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
             </div>
             <p className="text-xs mb-3" style={{ color: C.inkMuted }}>
-              Filtre par mot-clé TMDB (ambiance, sujet, univers...), cumulable avec les autres filtres. Fonctionne en Découverte, pas en recherche par titre/acteur.
+              Filtre par mot-clé TMDB (ambiance, sujet, univers...), en français ou en anglais, cumulable avec les autres filtres. Fonctionne en Découverte, pas en recherche par titre/acteur.
             </p>
             <div className="relative mb-3">
-              <input value={keywordQuery} onChange={(e) => onKeywordQueryChange(e.target.value)} placeholder="Ex : vampire, road trip, huis clos..."
+              <input value={keywordQuery} onChange={(e) => onKeywordQueryChange(e.target.value)} placeholder="Ex : amitié, braquage, voyage dans le temps..."
                 className="w-full rounded-lg px-3 py-2.5 text-sm" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }} />
               {keywordSearchBusy && <div className="absolute right-3 top-1/2 -translate-y-1/2"><Icon name="loader" size={14} color={C.inkMuted} /></div>}
               {!keywordSearchBusy && keywordQuery.trim().length >= 2 && (
@@ -2681,7 +2748,9 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                     return (
                       <button key={kw.id} disabled={already} onMouseDown={(e) => { e.preventDefault(); addCustomKeyword(kw); }}
                         className="w-full text-left text-sm px-3 py-2.5" style={{ background: C.bg, color: already ? C.inkMuted : C.ink, opacity: already ? 0.5 : 1, borderTop: `1px solid ${C.border}` }}>
-                        {kw.name}{already ? " · déjà ajouté" : ""}
+                        {kw.name}
+                        {kw.count > 0 && <span style={{ color: C.inkMuted }}> · {kw.count.toLocaleString("fr-FR")} {mediaType === "tv" ? "séries" : "films"}</span>}
+                        {already ? " · déjà ajouté" : ""}
                       </button>
                     );
                   })}
