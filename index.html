@@ -168,6 +168,45 @@ function findIptvMatch(catalog, title, mediaType) {
   return list.find((it) => normalizeForIptvMatch(it.name) === norm) || null;
 }
 
+// Filtre "Dispo IPTV" (cumulable avec les autres) : index titre normalise -> annees, construit une
+// seule fois par catalogue (plusieurs dizaines de milliers d'entrees, impossible a reparcourir pour
+// chaque resultat). Seules les versions exploitables au foyer comptent (langues ci-dessous) : un
+// titre present uniquement en |IT| ou |DE| ne doit pas passer le filtre. Le badge de la fiche
+// detail, lui, reste sur findIptvMatch (toutes langues).
+const IPTV_FILTER_LANGS = /^(FR|FR-4K|FR-4K DV|QC|VO|EN)$/;
+function buildIptvIndex(catalog) {
+  const make = (list) => {
+    const map = new Map();
+    for (const it of list || []) {
+      const name = it.name || "";
+      const lang = (name.match(/^\s*\|([^|]*)\|/) || [])[1];
+      if (lang && !IPTV_FILTER_LANGS.test(lang.trim())) continue;
+      // Annee sous la forme "(2019)" ou en suffixe "| 2016" selon les entrees.
+      const y = (name.match(/\((\d{4})\)/) || name.match(/\|\s*(\d{4})\s*$/) || [])[1];
+      const key = normalizeForIptvMatch(name.replace(/\|\s*\d{4}\s*$/, ""));
+      if (!key) continue;
+      if (!map.has(key)) map.set(key, new Set());
+      if (y) map.get(key).add(Number(y));
+    }
+    return map;
+  };
+  return { movie: make(catalog?.movies), tv: make(catalog?.series) };
+}
+// Titre FR ou original, et annee a +/- 1 an quand les deux cotes en ont une : evite qu'un remake
+// ou un homonyme d'une autre epoque passe pour le titre cherche.
+function isOnIptv(index, it) {
+  const map = index && index[it.media_type === "tv" ? "tv" : "movie"];
+  if (!map) return false;
+  const y = Number((it.release_date || it.first_air_date || "").slice(0, 4));
+  for (const t of [it.title || it.name, it.original_title || it.original_name]) {
+    const years = map.get(normalizeForIptvMatch(t));
+    if (!years) continue;
+    if (!y || !years.size) return true;
+    for (const iy of years) if (Math.abs(iy - y) <= 1) return true;
+  }
+  return false;
+}
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><rect width='400' height='600' fill='#1B1E2B'/><text x='200' y='300' fill='#8B8A99' font-family='sans-serif' font-size='20' text-anchor='middle'>Pas d'affiche</text></svg>`
 );
@@ -467,6 +506,8 @@ function CeSoir() {
   const [feedsManifest, setFeedsManifest] = useState(null);
   const [iptvCatalog, setIptvCatalog] = useState(null);
   const [iptvMatchForDetail, setIptvMatchForDetail] = useState(null);
+  const [iptvOnly, setIptvOnly] = useState(false);
+  const iptvIndex = useMemo(() => (iptvCatalog ? buildIptvIndex(iptvCatalog) : null), [iptvCatalog]);
   const [feedsError, setFeedsError] = useState("");
   const [fluxOpen, setFluxOpen] = useState(false);
   const [surpriseInfoOpen, setSurpriseInfoOpen] = useState(false);
@@ -977,7 +1018,7 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerIds = activeProviderIds, originCountries = activeCountries, certifications = activeCertifications, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined, page = 1, append = false, genreOr = false } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerIds = activeProviderIds, originCountries = activeCountries, certifications = activeCertifications, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined, page = 1, append = false, genreOr = false, iptv = iptvOnly } = {}) => {
     setResultsSource("discover");
     // Jeton anti-réponse périmée : si l'utilisateur change plusieurs filtres à la suite, seule la
     // dernière requête a le droit d'écrire dans la grille (sinon une réponse lente écrase ou se
@@ -990,7 +1031,7 @@ function CeSoir() {
     genreIds = mapGenreIds(genreIds, type);
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerIds, originCountries, certifications, yearFrom, yearTo, genreOr };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerIds, originCountries, certifications, yearFrom, yearTo, genreOr, iptv };
     try {
       // Tri par note : seuil de votes relevé, sinon les tout premiers résultats sont des titres
       // quasi inconnus avec 2-3 votes enthousiastes (séries : moins de votes, seuil plus bas).
@@ -1022,11 +1063,23 @@ function CeSoir() {
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
 
-      const data = await tmdbFetch(`/discover/${type === "movie" ? "movie" : "tv"}`, params);
-      if (seq !== resultsReqRef.current) return 0; // réponse périmée : une recherche plus récente a démarré
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
-      let items = (data.results || []).map((it) => ({ ...it, media_type: type }))
-        .filter((it) => !seenIds.has(`${type}-${it.id}`) && !dislikedKeys.has(`${type}-${it.id}`));
+      // Filtre "Dispo IPTV" : seule une partie de chaque page TMDB est au catalogue, donc on
+      // enchaine les pages (5 max par appel) jusqu'a avoir au moins 8 titres, sinon la grille
+      // resterait quasi vide. Sans ce filtre : une seule page, comportement inchange.
+      const useIptv = iptv && !!iptvIndex;
+      let data, items = [], lastPage = page;
+      for (let p = page; ; p++) {
+        params.page = String(p);
+        data = await tmdbFetch(`/discover/${type === "movie" ? "movie" : "tv"}`, params);
+        if (seq !== resultsReqRef.current) return 0; // réponse périmée : une recherche plus récente a démarré
+        lastPage = p;
+        let pageItems = (data.results || []).map((it) => ({ ...it, media_type: type }))
+          .filter((it) => !seenIds.has(`${type}-${it.id}`) && !dislikedKeys.has(`${type}-${it.id}`));
+        if (useIptv) pageItems = pageItems.filter((it) => isOnIptv(iptvIndex, it));
+        items.push(...pageItems);
+        if (!useIptv || items.length >= 8 || p >= (data.total_pages || 1) || p - page >= 4) break;
+      }
 
       // Le filtre certification de TMDB matche n'importe quelle mention de classification pour
       // le pays, y compris des avertissements de plateforme (ex. Prime Video "18" sur un film
@@ -1045,15 +1098,17 @@ function CeSoir() {
         if (seq !== resultsReqRef.current) return 0;
       }
 
-      setResultsPage(page);
-      setResultsHasMore(page < (data.total_pages || 1));
+      setResultsPage(lastPage);
+      setResultsHasMore(lastPage < (data.total_pages || 1));
       setResults((prev) => {
         if (!append) return items;
         const already = new Set(prev.map((p) => `${p.media_type}-${p.id}`));
         return [...prev, ...items.filter((it) => !already.has(`${it.media_type}-${it.id}`))];
       });
       if (!append) setCurrentIndex(0);
-      if (!append && !items.length) setResultsError(genreIds.length > 1 && !genreOr
+      if (!append && !items.length) setResultsError(useIptv
+        ? "Rien de dispo sur ton IPTV pour ces critères — élargis les filtres ou retire « Dispo IPTV »."
+        : genreIds.length > 1 && !genreOr
         ? "Aucun résultat pour ce cumul de genres — retire un genre ou élargis les filtres."
         : "Aucun résultat pour ces critères — élargis un peu les filtres.");
       return items.length;
@@ -1063,7 +1118,7 @@ function CeSoir() {
     } finally {
       if (append) setResultsLoadingMore(false); else if (seq === resultsReqRef.current) setResultsLoading(false);
     }
-  }, [mediaType, genreMap, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderIds, activeYearFrom, activeYearTo, activeCountries, activeCertifications, includeAdult]);
+  }, [mediaType, genreMap, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderIds, activeYearFrom, activeYearTo, activeCountries, activeCertifications, includeAdult, iptvOnly, iptvIndex]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -1289,6 +1344,7 @@ function CeSoir() {
         });
       }
       if (filters.originCountries?.length) items = items.filter((it) => (it.origin_country || []).some((c) => filters.originCountries.includes(c)));
+      if (filters.iptv && iptvIndex) items = items.filter((it) => isOnIptv(iptvIndex, it));
       if (filters.sort) {
         const sortField = filters.sort.startsWith("vote_average") ? "vote_average" : filters.sort.startsWith("primary_release_date") ? "date" : "popularity";
         items = [...items].sort((a, b) => {
@@ -1297,7 +1353,7 @@ function CeSoir() {
           return (b.popularity || 0) - (a.popularity || 0);
         });
       }
-      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.yearTo || filters.originCountries?.length;
+      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.yearTo || filters.originCountries?.length || filters.iptv;
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -1314,7 +1370,7 @@ function CeSoir() {
       if (!append && seq === resultsReqRef.current) setResultsError("Impossible de charger ce flux (Worker/TMDB hors ligne ?).");
     }
     if (append) setResultsLoadingMore(false); else if (seq === resultsReqRef.current) setResultsLoading(false);
-  }, [seenIds, dislikedItems, likedItems]);
+  }, [seenIds, dislikedItems, likedItems, iptvIndex]);
 
   function openFeed(feed) {
     setActiveFeed(feed);
@@ -1442,7 +1498,7 @@ Contraintes :
   // Genre / note / tri / pays / année sont ensuite appliqués en post-filtrage côté client : l'API
   // /search de TMDB ne les accepte pas nativement (contrairement à /discover), donc c'est la seule
   // façon de les rendre cumulables avec une recherche par texte.
-  async function runClassicSearch({ page = 1, append = false, type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, originCountries = activeCountries, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined } = {}) {
+  async function runClassicSearch({ page = 1, append = false, type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, originCountries = activeCountries, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined, iptv = iptvOnly } = {}) {
     const query = moodInput.trim();
     if (!query) return;
     setResultsSource("classic");
@@ -1510,6 +1566,7 @@ Contraintes :
           return true;
         });
       }
+      if (iptv && iptvIndex) items = items.filter((it) => isOnIptv(iptvIndex, it));
 
       const sortField = sort.startsWith("vote_average") ? "vote_average" : sort.startsWith("primary_release_date") ? "date" : "popularity";
       items.sort((a, b) => {
@@ -1578,6 +1635,7 @@ Contraintes :
         yearTo: activeYearTo ?? undefined,
         originCountries: activeCountries,
         sort: sortBy,
+        iptv: iptvOnly,
         ...overrides,
       };
       runFeed({ feed: { ...lastFeedRef.current, filters }, page: 1, append: false });
@@ -1790,7 +1848,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
   // tirées au hasard : chaque icône correspond toujours à la même approche, grisée si incompatible
   // avec les filtres déjà actifs à l'écran (repris via les valeurs par défaut de runDiscover).
   function getSurpriseStrategies() {
-    const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0;
+    const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0 || iptvOnly;
 
     // Genres du profil (à éviter en mode "sors des sentiers battus", sinon ce n'est plus une
     // découverte) et genres associés aux titres "j'aime pas" (à éviter tout court).
@@ -2230,6 +2288,13 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: minRating >= 7 ? C.amber : C.bgCard, color: minRating >= 7 ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="star" size={12} fill={minRating >= 7 ? "#1A1305" : "none"} /> 7+
         </button>
+        {iptvCatalog && (
+          <button onClick={() => { const v = !iptvOnly; setIptvOnly(v); applyFilters({ iptv: v }); }}
+            title={`Uniquement les titres présents sur ton IPTV${iptvCatalog.updated ? ` (catalogue du ${iptvCatalog.updated})` : ""}`}
+            className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1" style={{ background: iptvOnly ? C.amber : C.bgCard, color: iptvOnly ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
+            <Icon name="tv" size={12} /> Dispo IPTV
+          </button>
+        )}
         {/* Tri : appliqué à TOUS les résultats chargés (tri d'affichage, voir viewSort) et transmis à TMDB
             pour la découverte. Le bouton ↓/↑ inverse le sens (Note / Année uniquement). */}
         <select value={sortBy.replace(".asc", ".desc")} onChange={(e) => { setSortBy(e.target.value); setViewSort(viewSortFor(e.target.value)); setCurrentIndex(0); applyFilters({ sort: e.target.value }); }}
