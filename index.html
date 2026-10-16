@@ -1746,7 +1746,7 @@ Contraintes :
     if (cache.has(key)) return cache.get(key);
     let terms = [];
     try {
-      const cached = await storageGet(`kw-tr:${key}`);
+      const cached = await storageGet(`kw-tr2:${key}`);
       if (cached) terms = JSON.parse(cached);
       else {
         const res = await fetch(WORKER_URL, {
@@ -1755,7 +1755,7 @@ Contraintes :
           body: JSON.stringify({
             model: "claude-haiku-4-5",
             max_tokens: 100,
-            system: "Tu convertis un thème de film saisi par l'utilisateur (souvent en français) en 1 à 3 mots-clés anglais au format de la base TMDB (minuscules, termes courts et courants : \"friendship\", \"time travel\", \"heist\", \"survival\"). Réponds UNIQUEMENT par un tableau JSON de chaînes, sans aucun texte autour.",
+            system: "Tu convertis un thème de film saisi par l'utilisateur (souvent en français) en 1 à 3 mots-clés anglais au format de la base TMDB (minuscules, termes courts et courants : \"friendship\", \"time travel\", \"heist\", \"survival\"). Même si la saisie est déjà en anglais, donne les mots-clés TMDB les plus utilisés pour ce thème plutôt que la saisie telle quelle (ex. \"gay\" -> [\"gay theme\", \"lgbt\"], \"zombies\" -> [\"zombie\"]). Réponds UNIQUEMENT par un tableau JSON de chaînes, sans aucun texte autour.",
             messages: [{ role: "user", content: q }],
           }),
         });
@@ -1763,7 +1763,7 @@ Contraintes :
         const text = (data.content || []).map((b) => b.text || "").join("").replace(/```json|```/g, "").trim();
         const parsed = JSON.parse(text);
         terms = Array.isArray(parsed) ? parsed.filter((t) => typeof t === "string" && t.trim()).slice(0, 3) : [];
-        storageSet(`kw-tr:${key}`, JSON.stringify(terms));
+        storageSet(`kw-tr2:${key}`, JSON.stringify(terms));
       }
     } catch { terms = []; } // traduction indisponible : on garde au moins la recherche brute
     cache.set(key, terms);
