@@ -103,6 +103,11 @@ const COUNTRIES_FR = [
 ];
 
 const CURRENT_YEAR = new Date().getFullYear();
+// Filtre durée (max) : durée du film, ou durée d'un épisode pour les séries.
+const RUNTIME_OPTIONS = {
+  movie: [[90, "≤ 1h30"], [105, "≤ 1h45"], [120, "≤ 2h"]],
+  tv: [[30, "Épisodes ≤ 30 min"], [45, "Épisodes ≤ 45 min"], [60, "Épisodes ≤ 1h"]],
+};
 const YEAR_OPTIONS = Array.from({ length: CURRENT_YEAR - 1959 }, (_, i) => CURRENT_YEAR - i);
 
 // Classification TMDB pour la France (certification_country=FR), en excluant "NR" qui ne veut
@@ -448,6 +453,7 @@ function CeSoir() {
   // comme cas particulier d'une plage), les deux = plage inclusive.
   const [activeProviderIds, setActiveProviderIds] = useState([]);
   const [activeYearFrom, setActiveYearFrom] = useState(null);
+  const [activeMaxRuntime, setActiveMaxRuntime] = useState(null);
   const [activeYearTo, setActiveYearTo] = useState(null);
   const [activeCountries, setActiveCountries] = useState([]);
   const [activeCertifications, setActiveCertifications] = useState([]);
@@ -1067,7 +1073,7 @@ function CeSoir() {
     return () => { cancelled = true; };
   }, [historyOpen, textYearFilteredHistory, historyPosters]);
 
-  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerIds = activeProviderIds, originCountries = activeCountries, certifications = activeCertifications, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined, page = 1, append = false, genreOr = false, iptv = iptvOnly } = {}) => {
+  const runDiscover = useCallback(async ({ type = mediaType, genreIds = activeGenreIds, minVote = minRating, sort = sortBy, castIds = [], crewIds = [], keywordIds = combinedKeywordIds(), providerIds = activeProviderIds, originCountries = activeCountries, certifications = activeCertifications, yearFrom = activeYearFrom ?? undefined, yearTo = activeYearTo ?? undefined, page = 1, append = false, genreOr = false, iptv = iptvOnly, maxRuntime = activeMaxRuntime ?? undefined } = {}) => {
     setResultsSource("discover");
     // Jeton anti-réponse périmée : si l'utilisateur change plusieurs filtres à la suite, seule la
     // dernière requête a le droit d'écrire dans la grille (sinon une réponse lente écrase ou se
@@ -1080,7 +1086,7 @@ function CeSoir() {
     genreIds = mapGenreIds(genreIds, type);
     // Mémorisé pour que "charger plus" (scroll infini) puisse rejouer exactement les mêmes
     // critères sur la page suivante, sans avoir à tout re-décrire à l'appel.
-    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerIds, originCountries, certifications, yearFrom, yearTo, genreOr, iptv };
+    lastDiscoverParamsRef.current = { type, genreIds, minVote, sort, castIds, crewIds, keywordIds, providerIds, originCountries, certifications, yearFrom, yearTo, genreOr, iptv, maxRuntime };
     try {
       // Tri par note : seuil de votes relevé, sinon les tout premiers résultats sont des titres
       // quasi inconnus avec 2-3 votes enthousiastes (séries : moins de votes, seuil plus bas).
@@ -1111,6 +1117,7 @@ function CeSoir() {
       const dateField = type === "movie" ? "primary_release_date" : "first_air_date";
       if (yearFrom) params[`${dateField}.gte`] = `${yearFrom}-01-01`;
       if (yearTo) params[`${dateField}.lte`] = `${yearTo}-12-31`;
+      if (maxRuntime) { params["with_runtime.lte"] = String(maxRuntime); params["with_runtime.gte"] = "1"; }
 
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
       // Filtre "Dispo IPTV" : seule une partie de chaque page TMDB est au catalogue, donc on
@@ -1134,13 +1141,21 @@ function CeSoir() {
       // le pays, y compris des avertissements de plateforme (ex. Prime Video "18" sur un film
       // classé -16 en salle) — pas toujours fiable. On revérifie donc chaque résultat avec la
       // même logique que la fiche détail (priorité à la classification salle) avant affichage.
-      if (certifications.length) {
+      // Même revérification pour la durée : le with_runtime de /discover s'appuie sur une durée
+      // indexée parfois différente de celle de la fiche (constaté : un film de 1h42 remonté pour
+      // "≤ 1h30"). On refait donc foi à la durée de la fiche, la même que celle affichée.
+      if (certifications.length || maxRuntime) {
         const kind = type === "movie" ? "movie" : "tv";
         const extra = kind === "movie" ? "release_dates" : "content_ratings";
         const verified = await Promise.all(items.map(async (it) => {
           try {
-            const detail = await tmdbFetch(`/${kind}/${it.id}`, { append_to_response: extra });
-            return certifications.includes(certForFR(detail, type)) ? it : null;
+            const detail = await tmdbFetch(`/${kind}/${it.id}`, certifications.length ? { append_to_response: extra } : {});
+            if (certifications.length && !certifications.includes(certForFR(detail, type))) return null;
+            if (maxRuntime) {
+              const rt = kind === "movie" ? detail.runtime : (detail.episode_run_time?.[0] || detail.last_episode_to_air?.runtime);
+              if (!rt || rt > maxRuntime) return null;
+            }
+            return it;
           } catch { return null; }
         }));
         items = verified.filter(Boolean);
@@ -1167,7 +1182,7 @@ function CeSoir() {
     } finally {
       if (append) setResultsLoadingMore(false); else if (seq === resultsReqRef.current) setResultsLoading(false);
     }
-  }, [mediaType, genreMap, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderIds, activeYearFrom, activeYearTo, activeCountries, activeCertifications, includeAdult, iptvOnly, iptvIndex]);
+  }, [mediaType, genreMap, activeGenreIds, minRating, sortBy, seenIds, dislikedItems, lgbtActive, lgbtKeywordId, customKeywords, activeProviderIds, activeYearFrom, activeYearTo, activeCountries, activeCertifications, includeAdult, iptvOnly, iptvIndex, activeMaxRuntime]);
 
   // Rotation de l'ecran. Le manifeste PWA imposait "orientation": "portrait", ce qui verrouille
   // TOUTE l'app installee en portrait — y compris une video passee en plein ecran, d'ou le bouton
@@ -1666,7 +1681,7 @@ Contraintes :
     // chaque page d'un flux, donc incompatibles ici comme pour la recherche classique. Changer de
     // Films/Séries n'a pas de sens non plus au milieu d'un flux dont le média est fixé à sa
     // définition : on quitte alors le flux plutôt que de le filtrer.
-    const incompatibleWithFeed = "providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides;
+    const incompatibleWithFeed = "providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides || ("maxRuntime" in overrides && overrides.maxRuntime);
 
     if ("type" in overrides && inFeed) {
       // Changer Films/Séries n'a pas de sens au milieu d'un flux dont le média est fixé à sa
@@ -1675,7 +1690,7 @@ Contraintes :
       lastFeedRef.current = null;
       runDiscover(overrides);
     } else if (inClassicSearch) {
-      if ("providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides) {
+      if ("providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides || ("maxRuntime" in overrides && overrides.maxRuntime)) {
         showToast("Ce filtre n'est pas compatible avec une recherche par titre/acteur — utilisable en mode Découverte.");
         return;
       }
@@ -1972,7 +1987,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
   // tirées au hasard : chaque icône correspond toujours à la même approche, grisée si incompatible
   // avec les filtres déjà actifs à l'écran (repris via les valeurs par défaut de runDiscover).
   function getSurpriseStrategies() {
-    const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0 || iptvOnly;
+    const hasActiveFilter = activeGenreIds.length > 0 || minRating > 0 || lgbtActive || customKeywords.length > 0 || activeProviderIds.length > 0 || !!activeYearFrom || !!activeYearTo || activeCountries.length > 0 || activeCertifications.length > 0 || iptvOnly || !!activeMaxRuntime;
 
     // Genres du profil (à éviter en mode "sors des sentiers battus", sinon ce n'est plus une
     // découverte) et genres associés aux titres "j'aime pas" (à éviter tout court).
@@ -2378,12 +2393,12 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       </div>
 
       <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
-        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "movie"); setMediaType("movie"); setActiveGenreIds(g); applyFilters({ type: "movie", genreIds: g }); }}
+        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "movie"); setMediaType("movie"); setActiveGenreIds(g); setActiveMaxRuntime(null); applyFilters({ type: "movie", genreIds: g, maxRuntime: null }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "movie" ? C.amber : C.bgCard, color: mediaType === "movie" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="film" size={13} /> Films
         </button>
-        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "tv"); setMediaType("tv"); setActiveGenreIds(g); applyFilters({ type: "tv", genreIds: g }); }}
+        <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "tv"); setMediaType("tv"); setActiveGenreIds(g); setActiveMaxRuntime(null); applyFilters({ type: "tv", genreIds: g, maxRuntime: null }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "tv" ? C.amber : C.bgCard, color: mediaType === "tv" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
           <Icon name="tv" size={13} /> Séries
@@ -2415,6 +2430,12 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
             <Icon name="tv" size={12} /> Dispo IPTV
           </button>
         )}
+        <select value={activeMaxRuntime ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveMaxRuntime(v); applyFilters({ maxRuntime: v }); }}
+          title="Fonctionne en Découverte (et recherche IA / Surprends-moi), pas en recherche par titre/acteur ni dans un flux."
+          className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeMaxRuntime ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeMaxRuntime ? "#1A1305" : C.ink }}>
+          <option value="">Durée : Toutes</option>
+          {RUNTIME_OPTIONS[mediaType === "tv" ? "tv" : "movie"].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
         {/* Tri : appliqué à TOUS les résultats chargés (tri d'affichage, voir viewSort) et transmis à TMDB
             pour la découverte. Le bouton ↓/↑ inverse le sens (Note / Année uniquement). */}
         <select value={sortBy.replace(".asc", ".desc")} onChange={(e) => { setSortBy(e.target.value); setViewSort(viewSortFor(e.target.value)); setCurrentIndex(0); applyFilters({ sort: e.target.value }); }}
@@ -2436,12 +2457,14 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
             {activeProviderIds.length ? `Plateforme (${activeProviderIds.length})` : "Plateforme : Toutes"}
           </button>
         )}
-        <select value={activeYearFrom ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearFrom(v); applyFilters({ yearFrom: v ?? undefined, yearTo: activeYearTo ?? undefined }); }}
+        {/* null (et non undefined) quand on vide le champ : un undefined ferait reprendre à runDiscover /
+            runClassicSearch leur valeur par défaut, c'est-à-dire l'ancienne année encore dans le state. */}
+        <select value={activeYearFrom ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearFrom(v); applyFilters({ yearFrom: v, yearTo: activeYearTo }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYearFrom ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYearFrom ? "#1A1305" : C.ink }}>
           <option value="">Année de</option>
           {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
-        <select value={activeYearTo ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearTo(v); applyFilters({ yearTo: v ?? undefined, yearFrom: activeYearFrom ?? undefined }); }}
+        <select value={activeYearTo ?? ""} onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setActiveYearTo(v); applyFilters({ yearTo: v, yearFrom: activeYearFrom }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium" style={{ background: activeYearTo ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeYearTo ? "#1A1305" : C.ink }}>
           <option value="">à</option>
           {YEAR_OPTIONS.map((y) => <option key={y} value={y}>{y}</option>)}
