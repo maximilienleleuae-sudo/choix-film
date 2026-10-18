@@ -1378,6 +1378,23 @@ function CeSoir() {
           results: details.filter(Boolean).map((d) => ({ ...d, media_type: "movie" })),
           total_pages: Math.max(1, Math.ceil(all.length / PER_PAGE)),
         };
+      } else if (feed.type === "my-list") {
+        // Une de mes listes (Perso, Foyer, Déjà vu, J'aime, J'aime pas) ouverte dans la grille. On
+        // charge la fiche complète de TOUS les titres d'un coup (par paquets de 10), puis les
+        // filtres et le tri s'appliquent à la liste entière, pas page par page : sinon un tri par
+        // note ne serait juste qu'à l'intérieur de chaque paquet. Les fiches complètes portent aussi
+        // la durée, d'où le filtre durée disponible ici alors qu'il ne l'est pas dans les autres flux.
+        const refs = feed.refs || [];
+        const details = [];
+        for (let i = 0; i < refs.length; i += 10) {
+          const chunk = await Promise.all(refs.slice(i, i + 10).map((r) =>
+            tmdbFetch(`/${r.media_type === "tv" ? "tv" : "movie"}/${r.id}`).then((d) => ({ ...d, media_type: r.media_type === "tv" ? "tv" : "movie" })).catch(() => null)));
+          details.push(...chunk.filter(Boolean));
+          if (seq !== resultsReqRef.current) return; // liste quittée ou autre recherche lancée entre-temps
+          if (refs.length > 10) setActiveFeed({ ...feed, description: `Chargement ${Math.min(i + 10, refs.length)} / ${refs.length}…` });
+        }
+        setActiveFeed({ ...feed, description: `${details.length} titre${details.length > 1 ? "s" : ""} · filtres appliqués à toute la liste` });
+        data = { results: details, total_pages: 1 };
       } else if (feed.type === "tmdb-ids") {
         // Liste figee ("snapshot") : ids TMDB deja resolus une fois pour toutes et stockes tels
         // quels dans flux/index.json (champ "ids") — pour une source sans flux exploitable (ex.
@@ -1399,9 +1416,12 @@ function CeSoir() {
       }
       if (seq !== resultsReqRef.current) return; // réponse périmée
       const dislikedKeys = new Set(dislikedItems.map((f) => f.key));
+      const isMyList = feed.type === "my-list";
       let items = (data.results || [])
         .map((it) => ({ ...it, media_type: it.media_type === "tv" || it.media_type === "movie" ? it.media_type : media }))
-        .filter((it) => !seenIds.has(`${it.media_type}-${it.id}`) && !dislikedKeys.has(`${it.media_type}-${it.id}`));
+        // Pas d'exclusion déjà-vu / j'aime-pas sur mes propres listes : ouvrir "Déjà vu" ou
+        // "J'aime pas" donnerait sinon une grille vide.
+        .filter((it) => isMyList || (!seenIds.has(`${it.media_type}-${it.id}`) && !dislikedKeys.has(`${it.media_type}-${it.id}`)));
 
       // Filtres genre / note / année / pays / tri appliqués côté client sur les résultats déjà
       // récupérés (déjà présents sur chaque item, pas d'appel supplémentaire) — pour pouvoir
@@ -1422,6 +1442,14 @@ function CeSoir() {
       }
       if (filters.originCountries?.length) items = items.filter((it) => (it.origin_country || []).some((c) => filters.originCountries.includes(c)));
       if (filters.iptv && iptvIndex) items = items.filter((it) => isOnIptv(iptvIndex, it));
+      // Spécifiques à mes listes (mélange films/séries, fiches complètes avec durée).
+      if (isMyList && filters.type) items = items.filter((it) => it.media_type === filters.type);
+      if (isMyList && filters.maxRuntime) {
+        items = items.filter((it) => {
+          const rt = it.media_type === "movie" ? it.runtime : (it.episode_run_time?.[0] || it.last_episode_to_air?.runtime);
+          return rt && rt <= filters.maxRuntime;
+        });
+      }
       if (filters.sort) {
         const sortField = filters.sort.startsWith("vote_average") ? "vote_average" : filters.sort.startsWith("primary_release_date") ? "date" : "popularity";
         items = [...items].sort((a, b) => {
@@ -1430,7 +1458,7 @@ function CeSoir() {
           return (b.popularity || 0) - (a.popularity || 0);
         });
       }
-      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.yearTo || filters.originCountries?.length || filters.iptv;
+      const hasFeedFilter = filters.genreIds?.length || filters.minVote || filters.yearFrom || filters.yearTo || filters.originCountries?.length || filters.iptv || filters.type || filters.maxRuntime;
 
       setResultsPage(page);
       setResultsHasMore(page < (data.total_pages || 1));
@@ -1452,6 +1480,22 @@ function CeSoir() {
   function openFeed(feed) {
     setActiveFeed(feed);
     setFluxOpen(false);
+    runFeed({ feed, page: 1, append: false });
+  }
+
+  // Ouvre une de mes listes dans la grille (voir runFeed, type "my-list"). Films et séries mélangés
+  // par défaut ; les boutons Films / Séries filtrent ensuite sans quitter la liste.
+  function openListInGrid(tab) {
+    const refs = tab.items
+      .map((f) => {
+        if (typeof f === "string") { const [mt, id] = f.split("-"); return { id: Number(id), media_type: mt }; } // ancien format "movie-123"
+        return f.id ? { id: f.id, media_type: f.media_type } : null;
+      })
+      .filter((r) => r && r.id && (r.media_type === "movie" || r.media_type === "tv"));
+    if (!refs.length) { showToast("Cette liste est vide."); return; }
+    const feed = { id: `list-${tab.id}`, type: "my-list", label: `Ma liste : ${tab.label}`, refs, filters: { genreIds: activeGenreIds, minVote: minRating, yearFrom: activeYearFrom ?? undefined, yearTo: activeYearTo ?? undefined, originCountries: activeCountries, sort: sortBy, iptv: iptvOnly, maxRuntime: activeMaxRuntime, type: null } };
+    setFavDrawerOpen(false);
+    setActiveFeed(feed);
     runFeed({ feed, page: 1, append: false });
   }
 
@@ -1681,9 +1725,12 @@ Contraintes :
     // chaque page d'un flux, donc incompatibles ici comme pour la recherche classique. Changer de
     // Films/Séries n'a pas de sens non plus au milieu d'un flux dont le média est fixé à sa
     // définition : on quitte alors le flux plutôt que de le filtrer.
-    const incompatibleWithFeed = "providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides || ("maxRuntime" in overrides && overrides.maxRuntime);
+    const inMyList = inFeed && lastFeedRef.current.type === "my-list";
+    const incompatibleWithFeed = "providerIds" in overrides || "keywordIds" in overrides || "certifications" in overrides || (!inMyList && "maxRuntime" in overrides && overrides.maxRuntime);
 
-    if ("type" in overrides && inFeed) {
+    // Dans une de mes listes, recliquer sur le type déjà filtré (Films ou Séries) revient au mélange.
+    if (inMyList && "type" in overrides && overrides.type === lastFeedRef.current.filters?.type) overrides = { ...overrides, type: null };
+    if ("type" in overrides && inFeed && !inMyList) {
       // Changer Films/Séries n'a pas de sens au milieu d'un flux dont le média est fixé à sa
       // définition : on quitte plutôt que d'afficher un toast pendant que le bouton bascule déjà.
       setActiveFeed(null);
@@ -1713,6 +1760,8 @@ Contraintes :
         originCountries: activeCountries,
         sort: sortBy,
         iptv: iptvOnly,
+        // Mes listes : type (Films/Séries) et durée persistent d'un changement de filtre à l'autre.
+        ...(inMyList ? { type: lastFeedRef.current.filters?.type ?? null, maxRuntime: activeMaxRuntime } : {}),
         ...overrides,
       };
       runFeed({ feed: { ...lastFeedRef.current, filters }, page: 1, append: false });
@@ -2741,6 +2790,12 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
               ))}
             </div>
             <div className="px-5 pb-6 overflow-y-auto" style={{ maxHeight: "50vh" }}>
+              {activeTab.items.length > 0 && (
+                <button onClick={() => openListInGrid(activeTab)} className="w-full rounded-lg py-2 mb-1 text-xs font-medium flex items-center justify-center gap-1.5"
+                  style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.ink }}>
+                  <Icon name="search" size={13} color={C.amber} /> Ouvrir dans la grille et filtrer
+                </button>
+              )}
               {activeTab.items.length === 0 && <p className="text-xs pb-3" style={{ color: C.inkMuted }}>{activeTab.empty}</p>}
               {activeTab.items.map((f) => (
                 <div key={f.key} className="flex items-center gap-3 py-2" style={{ borderBottom: `1px solid ${C.border}` }}>
