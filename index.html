@@ -2155,14 +2155,14 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
 
   function markSeenElsewhere(item) { recordSeen(item); showToast("Marqué comme déjà vu"); }
 
-  function addFavorite(item) {
-    if (!whoAmI) { showToast("Choisis d'abord qui tu es dans les Réglages"); advanceCard(); return; }
+  function addFavorite(item, advance = true) {
+    if (!whoAmI) { showToast("Choisis d'abord qui tu es dans les Réglages"); if (advance) advanceCard(); return; }
     const key = `${item.media_type}-${item.id}`;
-    if (favorites.some((f) => f.key === key)) { advanceCard(); return; }
+    if (favorites.some((f) => f.key === key)) { if (advance) advanceCard(); return; }
     const fav = { key, id: item.id, media_type: item.media_type, title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
     setFavorites((prev) => [fav, ...prev].slice(0, CAPS.perso));
     sharedFetch("/perso-add", { method: "POST", body: { email: whoAmI, item: fav } }).catch(() => {});
-    showToast("Ajouté à ta sélection perso ♥"); advanceCard();
+    showToast("Ajouté à ta sélection perso ♥"); if (advance) advanceCard();
   }
 
   function removeFavorite(key) {
@@ -2217,6 +2217,28 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
   function removeDislike(key) {
     setDislikedItems((prev) => prev.filter((f) => f.key !== key));
     sharedFetch("/dislike-remove", { method: "POST", body: { key } }).catch(() => {});
+  }
+
+  // Boutons de liste en bascule (vue liste, carte swipe, historique) : l'icône pleine / vide reflète
+  // l'état et recliquer retire. Avant, ces boutons ne faisaient qu'ajouter, avec un message mais sans
+  // changement visuel (et le cœur du swipe passait même à la carte suivante). Le geste de swipe vers
+  // la droite, lui, garde addFavorite : ajout + carte suivante.
+  const keyOf = (item) => `${item.media_type}-${item.id}`;
+  function toggleFavorite(item) {
+    if (favorites.some((f) => f.key === keyOf(item))) { removeFavorite(keyOf(item)); showToast("Retiré de ta sélection perso"); }
+    else addFavorite(item, false);
+  }
+  function toggleSharedFavorite(item) {
+    if (sharedFavorites.some((f) => f.key === keyOf(item))) { removeSharedFavorite(keyOf(item)); showToast("Retiré de la sélection du foyer"); }
+    else addSharedFavorite(item);
+  }
+  function toggleLike(item) {
+    if (likedItems.some((f) => f.key === keyOf(item))) { removeLike(keyOf(item)); showToast("Retiré des goûts du foyer"); }
+    else addLike(item);
+  }
+  function toggleDislike(item) {
+    if (dislikedItems.some((f) => f.key === keyOf(item))) { removeDislike(keyOf(item)); showToast("De nouveau proposé dans les suggestions"); }
+    else addDislike(item);
   }
 
   async function openTrailer(item) {
@@ -2628,10 +2650,10 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       <Icon name="star" size={11} color={C.amber} fill={C.amber} />{it.vote_average?.toFixed(1) ?? "—"}
                     </div>
                     <div className="flex items-center gap-0.5">
-                      <button onClick={() => addLike(it)} aria-label="J'aime" className="p-1.5 rounded-full" style={{ background: isLiked ? "#1E3A22" : "transparent" }}>
+                      <button onClick={() => toggleLike(it)} aria-label="J'aime" className="p-1.5 rounded-full" style={{ background: isLiked ? "#1E3A22" : "transparent" }}>
                         <Icon name="thumbsUp" size={15} color="#5FAE6C" fill={isLiked ? "#5FAE6C" : "none"} />
                       </button>
-                      <button onClick={() => addDislike(it)} aria-label="J'aime pas" className="p-1.5 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
+                      <button onClick={() => toggleDislike(it)} aria-label="J'aime pas" className="p-1.5 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
                         <Icon name="thumbsDown" size={15} color={C.danger} fill={isDisliked ? C.danger : "none"} />
                       </button>
                       <button onClick={() => markSeenElsewhere(it)} aria-label="Marquer comme déjà vu" className="p-1.5 rounded-full">
@@ -2639,10 +2661,10 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       </button>
                     </div>
                     <div className="flex items-center gap-0.5">
-                      <button onClick={() => addFavorite(it)} aria-label="Ajouter à ma sélection perso" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
+                      <button onClick={() => toggleFavorite(it)} aria-label="Ajouter à ma sélection perso" className="p-1.5 rounded-full" style={{ background: isFav ? "#2A2A18" : "transparent" }}>
                         <Icon name="heart" size={15} color={C.amber} fill={isFav ? C.amber : "none"} />
                       </button>
-                      <button onClick={() => addSharedFavorite(it)} aria-label="Ajouter à la sélection du foyer" className="p-1.5 rounded-full" style={{ background: isSharedFav ? "#16302E" : "transparent" }}>
+                      <button onClick={() => toggleSharedFavorite(it)} aria-label="Ajouter à la sélection du foyer" className="p-1.5 rounded-full" style={{ background: isSharedFav ? "#16302E" : "transparent" }}>
                         <Icon name="home" size={15} color={C.teal} fill={isSharedFav ? C.teal : "none"} />
                       </button>
                     </div>
@@ -2699,14 +2721,22 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                     )}
                   </div>
                 )}
-                <div className="flex items-center gap-2 mb-2">
-                  <button onClick={() => addLike(current)} className="flex-1 rounded-full py-2 text-xs font-medium flex items-center justify-center gap-1.5" style={{ background: "#1E3A22", border: `1px solid ${C.border}` }} aria-label="J'aime">
-                    <Icon name="thumbsUp" size={14} color="#5FAE6C" /> J'aime
-                  </button>
-                  <button onClick={() => addDislike(current)} className="flex-1 rounded-full py-2 text-xs font-medium flex items-center justify-center gap-1.5" style={{ background: "#3A1E1E", border: `1px solid ${C.border}` }} aria-label="J'aime pas">
-                    <Icon name="thumbsDown" size={14} color={C.danger} /> J'aime pas
-                  </button>
-                </div>
+                {(() => {
+                  // État courant de la carte dans chaque liste : bouton plein + bordure colorée quand actif.
+                  const k = `${current.media_type}-${current.id}`;
+                  const liked = likedItems.some((f) => f.key === k);
+                  const disliked = dislikedItems.some((f) => f.key === k);
+                  return (
+                    <div className="flex items-center gap-2 mb-2">
+                      <button onClick={() => toggleLike(current)} className="flex-1 rounded-full py-2 text-xs font-medium flex items-center justify-center gap-1.5" style={{ background: liked ? "#5FAE6C" : "#1E3A22", color: liked ? "#0A1B0D" : C.ink, border: `1px solid ${liked ? "#5FAE6C" : C.border}` }} aria-label="J'aime" aria-pressed={liked}>
+                        <Icon name="thumbsUp" size={14} color={liked ? "#0A1B0D" : "#5FAE6C"} fill={liked ? "#0A1B0D" : "none"} /> {liked ? "J'aime ✓" : "J'aime"}
+                      </button>
+                      <button onClick={() => toggleDislike(current)} className="flex-1 rounded-full py-2 text-xs font-medium flex items-center justify-center gap-1.5" style={{ background: disliked ? C.danger : "#3A1E1E", color: disliked ? "#fff" : C.ink, border: `1px solid ${disliked ? C.danger : C.border}` }} aria-label="J'aime pas" aria-pressed={disliked}>
+                        <Icon name="thumbsDown" size={14} color={disliked ? "#fff" : C.danger} fill={disliked ? "#fff" : "none"} /> {disliked ? "J'aime pas ✓" : "J'aime pas"}
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div className="flex items-center gap-2">
                   <button onClick={() => markSeen(current)} className="p-3 rounded-full" style={{ background: "#2A2130", border: `1px solid ${C.border}` }} aria-label="Déjà vu, passer">
                     <Icon name="x" size={18} color={C.danger} />
@@ -2714,12 +2744,21 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                   <button onClick={() => openTrailer(current)} className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
                     <Icon name="play" size={15} color={C.ink} fill={C.ink} /> Bande-annonce
                   </button>
-                  <button onClick={() => addFavorite(current)} className="p-3 rounded-full" style={{ background: "#2A2A18", border: `1px solid ${C.border}` }} aria-label="Ajouter à ma sélection perso">
-                    <Icon name="heart" size={18} color={C.amber} />
-                  </button>
-                  <button onClick={() => addSharedFavorite(current)} className="p-3 rounded-full" style={{ background: "#16302E", border: `1px solid ${C.border}` }} aria-label="Ajouter à la sélection du foyer">
-                    <Icon name="home" size={18} color={C.teal} />
-                  </button>
+                  {(() => {
+                    const k = `${current.media_type}-${current.id}`;
+                    const fav = favorites.some((f) => f.key === k);
+                    const shared = sharedFavorites.some((f) => f.key === k);
+                    return (
+                      <>
+                        <button onClick={() => toggleFavorite(current)} className="p-3 rounded-full" style={{ background: fav ? C.amber : "#2A2A18", border: `1px solid ${fav ? C.amber : C.border}` }} aria-label={fav ? "Retirer de ma sélection perso" : "Ajouter à ma sélection perso"} aria-pressed={fav}>
+                          <Icon name="heart" size={18} color={fav ? "#1A1305" : C.amber} fill={fav ? "#1A1305" : "none"} />
+                        </button>
+                        <button onClick={() => toggleSharedFavorite(current)} className="p-3 rounded-full" style={{ background: shared ? C.teal : "#16302E", border: `1px solid ${shared ? C.teal : C.border}` }} aria-label={shared ? "Retirer de la sélection du foyer" : "Ajouter à la sélection du foyer"} aria-pressed={shared}>
+                          <Icon name="home" size={18} color={shared ? "#0A1614" : C.teal} fill={shared ? "#0A1614" : "none"} />
+                        </button>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -3147,10 +3186,10 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                           </button>
                           {historyItem && (
                             <div className="flex items-center gap-0.5 shrink-0">
-                              <button onClick={() => addLike(historyItem)} aria-label="J'aime" className="p-1 rounded-full" style={{ background: isLiked ? "#1E3A22" : "transparent" }}>
+                              <button onClick={() => toggleLike(historyItem)} aria-label="J'aime" className="p-1 rounded-full" style={{ background: isLiked ? "#1E3A22" : "transparent" }}>
                                 <Icon name="thumbsUp" size={14} color="#5FAE6C" fill={isLiked ? "#5FAE6C" : "none"} />
                               </button>
-                              <button onClick={() => addDislike(historyItem)} aria-label="J'aime pas" className="p-1 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
+                              <button onClick={() => toggleDislike(historyItem)} aria-label="J'aime pas" className="p-1 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
                                 <Icon name="thumbsDown" size={14} color={C.danger} fill={isDisliked ? C.danger : "none"} />
                               </button>
                             </div>
@@ -3334,7 +3373,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                         aria-label={isSeenD ? "Retirer de déjà vu" : "Marquer comme déjà vu"}>
                         <Icon name="eyeOff" size={18} color={isSeenD ? C.ink : C.inkMuted} />
                       </button>
-                      <button onClick={() => (isFavD ? removeFavorite(detailKey) : addFavorite(detailPayload))}
+                      <button onClick={() => (isFavD ? removeFavorite(detailKey) : addFavorite(detailPayload, false))}
                         className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2"
                         style={{ background: isFavD ? C.amber : C.bg, color: isFavD ? "#1A1305" : C.ink, border: `1px solid ${isFavD ? C.amber : C.border}` }}>
                         <Icon name="heart" size={16} color={isFavD ? "#1A1305" : C.amber} fill={isFavD ? "#1A1305" : "none"} /> {isFavD ? "En perso ✓" : "Perso"}
