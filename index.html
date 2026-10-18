@@ -2155,6 +2155,13 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
 
   function markSeenElsewhere(item) { recordSeen(item); showToast("Marqué comme déjà vu"); }
 
+  // Bascule déjà vu (vue liste) : recliquer retire, comme les autres boutons de liste.
+  function toggleSeen(item) {
+    const key = `${item.media_type}-${item.id}`;
+    if (seenIds.has(key)) { removeSeen(key); showToast("Retiré de déjà vu"); }
+    else markSeenElsewhere(item);
+  }
+
   function addFavorite(item, advance = true) {
     if (!whoAmI) { showToast("Choisis d'abord qui tu es dans les Réglages"); if (advance) advanceCard(); return; }
     const key = `${item.media_type}-${item.id}`;
@@ -2656,8 +2663,9 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       <button onClick={() => toggleDislike(it)} aria-label="J'aime pas" className="p-1.5 rounded-full" style={{ background: isDisliked ? "#3A1E1E" : "transparent" }}>
                         <Icon name="thumbsDown" size={15} color={C.danger} fill={isDisliked ? C.danger : "none"} />
                       </button>
-                      <button onClick={() => markSeenElsewhere(it)} aria-label="Marquer comme déjà vu" className="p-1.5 rounded-full">
-                        <Icon name="eyeOff" size={15} color={C.inkMuted} />
+                      <button onClick={() => toggleSeen(it)} aria-label={seenIds.has(key) ? "Retirer de déjà vu" : "Marquer comme déjà vu"} aria-pressed={seenIds.has(key)}
+                        className="p-1.5 rounded-full" style={{ background: seenIds.has(key) ? C.ink : "transparent" }}>
+                        <Icon name="eyeOff" size={15} color={seenIds.has(key) ? C.bg : C.inkMuted} />
                       </button>
                     </div>
                     <div className="flex items-center gap-0.5">
@@ -3369,9 +3377,9 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                     </div>
                     <div className="flex gap-2">
                       <button onClick={() => (isSeenD ? removeSeen(detailKey) : markSeenElsewhere(detailPayload))}
-                        className="p-3 rounded-full" style={{ background: isSeenD ? "#2A2130" : C.bg, border: `1px solid ${isSeenD ? C.ink : C.border}` }}
-                        aria-label={isSeenD ? "Retirer de déjà vu" : "Marquer comme déjà vu"}>
-                        <Icon name="eyeOff" size={18} color={isSeenD ? C.ink : C.inkMuted} />
+                        className="p-3 rounded-full" style={{ background: isSeenD ? C.ink : C.bg, border: `1px solid ${isSeenD ? C.ink : C.border}` }}
+                        aria-label={isSeenD ? "Retirer de déjà vu" : "Marquer comme déjà vu"} aria-pressed={isSeenD}>
+                        <Icon name="eyeOff" size={18} color={isSeenD ? C.bg : C.inkMuted} />
                       </button>
                       <button onClick={() => (isFavD ? removeFavorite(detailKey) : addFavorite(detailPayload, false))}
                         className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2"
