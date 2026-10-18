@@ -376,6 +376,7 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
     download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></>,
     home: <><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>,
+    eye: <><path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>,
     eyeOff: <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a17.5 17.5 0 0 1-2.16 3.19M6.61 6.61C3.9 8.36 2 12 2 12s3 8 10 8a9.27 9.27 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></>,
     thumbsUp: <><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></>,
     rss: <><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1" fill={color}/></>,
@@ -2665,7 +2666,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       </button>
                       <button onClick={() => toggleSeen(it)} aria-label={seenIds.has(key) ? "Retirer de déjà vu" : "Marquer comme déjà vu"} aria-pressed={seenIds.has(key)}
                         className="p-1.5 rounded-full" style={{ background: seenIds.has(key) ? C.ink : "transparent" }}>
-                        <Icon name="eyeOff" size={15} color={seenIds.has(key) ? C.bg : C.inkMuted} />
+                        <Icon name={seenIds.has(key) ? "eye" : "eyeOff"} size={15} color={seenIds.has(key) ? C.bg : C.inkMuted} />
                       </button>
                     </div>
                     <div className="flex items-center gap-0.5">
@@ -3379,7 +3380,7 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                       <button onClick={() => (isSeenD ? removeSeen(detailKey) : markSeenElsewhere(detailPayload))}
                         className="p-3 rounded-full" style={{ background: isSeenD ? C.ink : C.bg, border: `1px solid ${isSeenD ? C.ink : C.border}` }}
                         aria-label={isSeenD ? "Retirer de déjà vu" : "Marquer comme déjà vu"} aria-pressed={isSeenD}>
-                        <Icon name="eyeOff" size={18} color={isSeenD ? C.bg : C.inkMuted} />
+                        <Icon name={isSeenD ? "eye" : "eyeOff"} size={18} color={isSeenD ? C.bg : C.inkMuted} />
                       </button>
                       <button onClick={() => (isFavD ? removeFavorite(detailKey) : addFavorite(detailPayload, false))}
                         className="flex-1 rounded-full py-3 text-sm font-medium flex items-center justify-center gap-2"
