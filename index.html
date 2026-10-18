@@ -2466,6 +2466,15 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
       </div>
 
       <div className="px-5 pt-3 pb-2 flex gap-2 overflow-x-auto scrollbar-none">
+        {/* Mode d'affichage en tête de barre : toujours visible sans faire défiler les filtres. */}
+        <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
+          {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
+            <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
+              style={{ background: resultsView === v ? C.amber : "transparent" }}>
+              <Icon name={icon} size={13} color={resultsView === v ? "#1A1305" : C.inkMuted} />
+            </button>
+          ))}
+        </div>
         <button onClick={() => { const g = mapGenresOnSwitch(activeGenreIds, "movie"); setMediaType("movie"); setActiveGenreIds(g); setActiveMaxRuntime(null); applyFilters({ type: "movie", genreIds: g, maxRuntime: null }); }}
           className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5"
           style={{ background: mediaType === "movie" ? C.amber : C.bgCard, color: mediaType === "movie" ? "#1A1305" : C.ink, border: `1px solid ${C.border}` }}>
@@ -2550,14 +2559,6 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           style={{ background: activeCertifications.length ? C.amber : C.bgCard, border: `1px solid ${C.border}`, color: activeCertifications.length ? "#1A1305" : C.ink }}>
           {activeCertifications.length ? `Classification (${activeCertifications.length})` : "Classification : Toutes"}
         </button>
-        <div className="shrink-0 flex gap-0.5 rounded-full p-0.5" style={{ background: C.bgCard, border: `1px solid ${C.border}` }}>
-          {[["grid", "grid", "Galerie"], ["list", "list", "Liste"], ["swipe", "layers", "Swipe"]].map(([v, icon, label]) => (
-            <button key={v} onClick={() => setResultsView(v)} aria-label={label} className="rounded-full p-1.5"
-              style={{ background: resultsView === v ? C.amber : "transparent" }}>
-              <Icon name={icon} size={13} color={resultsView === v ? "#1A1305" : C.inkMuted} />
-            </button>
-          ))}
-        </div>
         {results.length > 0 && (
           <button onClick={shareResults} aria-label="Partager ces résultats" title="Partager ces résultats (WhatsApp, SMS…)"
             className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium flex items-center gap-1.5" style={{ background: C.bgCard, border: `1px solid ${C.border}`, color: C.ink }}>
