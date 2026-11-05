@@ -1988,7 +1988,9 @@ Contraintes :
       // release_dates (films) / content_ratings (séries) : classifications par pays, dont FR,
       // pour l'étiquette d'âge affichée dans la fiche.
       const extra = kind === "movie" ? "release_dates" : "content_ratings";
-      const data = await tmdbFetch(`/${kind}/${id}`, { append_to_response: `credits,videos,watch/providers,keywords,${extra}` });
+      // Séries : aggregate_credits en plus, seule source fiable des réalisateurs d'épisodes
+      // (created_by est vide pour beaucoup de séries, ex. Slow Horses).
+      const data = await tmdbFetch(`/${kind}/${id}`, { append_to_response: `credits,videos,watch/providers,keywords,${extra}${kind === "tv" ? ",aggregate_credits" : ""}` });
       setDetailData(data);
     } catch { setDetailData({ error: true }); }
     setDetailLoading(false);
@@ -3327,28 +3329,38 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                     )}
                     <p className="text-sm leading-snug mb-4" style={{ color: C.inkMuted }}>{d.overview || "Synopsis non disponible."}</p>
                     {(() => {
-                      // Films : le job "Director" dans l'équipe technique. Séries : pas de "Director"
-                      // au niveau de la série (seulement par épisode) — created_by (le·s créateur·s)
-                      // est l'équivalent pertinent ici. Cliquable vers sa filmographie, comme le casting.
-                      const directors = detailItem.media_type === "movie"
+                      // Films : le job "Director" de l'équipe technique. Séries : pas de réalisateur au
+                      // niveau de la série — on affiche le·s créateur·s (created_by, souvent vide, ex.
+                      // Slow Horses) ET les 3 réalisateurs ayant tourné le plus d'épisodes
+                      // (aggregate_credits). Chaque nom ouvre sa filmographie, comme le casting.
+                      const isMovie = detailItem.media_type === "movie";
+                      const creators = isMovie ? [] : (d.created_by || []);
+                      const directors = isMovie
                         ? (d.credits?.crew || []).filter((c) => c.job === "Director")
-                        : (d.created_by || []);
-                      if (!directors.length) return null;
-                      const label = detailItem.media_type === "movie"
-                        ? (directors.length > 1 ? "RÉALISATEURS" : "RÉALISATEUR")
-                        : (directors.length > 1 ? "CRÉATEURS" : "CRÉATEUR");
-                      return (
+                        : (d.aggregate_credits?.crew || [])
+                          .map((c) => ({ id: c.id, name: c.name, episodes: (c.jobs || []).filter((j) => j.job === "Director").reduce((n, j) => n + (j.episode_count || 0), 0) }))
+                          .filter((c) => c.episodes > 0)
+                          .sort((a, b) => b.episodes - a.episodes)
+                          .slice(0, 3);
+                      const block = (label, people, withEpisodes) => people.length > 0 && (
                         <div className="mb-4">
                           <p className="text-xs font-mono mb-1.5" style={{ color: C.inkMuted }}>{label}</p>
                           <p className="text-sm" style={{ color: C.ink }}>
-                            {directors.map((p, i) => (
+                            {people.map((p, i) => (
                               <React.Fragment key={p.id}>
                                 <button onClick={() => searchByPersonId(p.id, p.name)} className="underline underline-offset-2" style={{ color: C.ink }}>{p.name}</button>
-                                {i < directors.length - 1 ? ", " : ""}
+                                {withEpisodes && p.episodes ? <span style={{ color: C.inkMuted }}> ({p.episodes} ép.)</span> : null}
+                                {i < people.length - 1 ? ", " : ""}
                               </React.Fragment>
                             ))}
                           </p>
                         </div>
+                      );
+                      return (
+                        <>
+                          {block(creators.length > 1 ? "CRÉATEURS" : "CRÉATEUR", creators, false)}
+                          {block(directors.length > 1 ? "RÉALISATEURS" : "RÉALISATEUR", directors, !isMovie)}
+                        </>
                       );
                     })()}
                     {cast.length > 0 && (
