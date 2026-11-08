@@ -376,6 +376,8 @@ function Icon({ name, size = 18, color = "currentColor", fill = "none" }) {
     layers: <><rect x="4" y="6" width="12" height="16" rx="2" transform="translate(4,-2)"/><rect x="4" y="2" width="12" height="16" rx="2"/></>,
     download: <><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></>,
     home: <><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>,
+    calendar: <><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></>,
+    bell: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></>,
     eye: <><path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>,
     eyeOff: <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a17.5 17.5 0 0 1-2.16 3.19M6.61 6.61C3.9 8.36 2 12 2 12s3 8 10 8a9.27 9.27 0 0 0 5.39-1.61"/><path d="M2 2l20 20"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></>,
     thumbsUp: <><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></>,
@@ -554,6 +556,13 @@ function CeSoir() {
   const [favorites, setFavorites] = useState([]);
   const [sharedFavorites, setSharedFavorites] = useState([]);
   const [likedItems, setLikedItems] = useState([]);
+  // Séries suivies (bouton « Suivre » des fiches séries) — liste foyer côté Worker (KV "follows").
+  const [follows, setFollows] = useState([]);
+  // Écran « Prochains épisodes ».
+  const [episodesOpen, setEpisodesOpen] = useState(false);
+  const [episodesData, setEpisodesData] = useState(null); // { upcoming, recent, undated, endedCount, total }
+  const [episodesLoading, setEpisodesLoading] = useState(false);
+  const [episodesProgress, setEpisodesProgress] = useState("");
   const [dislikedItems, setDislikedItems] = useState([]);
   const [favDrawerOpen, setFavDrawerOpen] = useState(false);
   // Flux de decouverte : catalogue de sources decrit dans flux/index.json, servi par Pages a cote
@@ -623,6 +632,7 @@ function CeSoir() {
         if (Array.isArray(shared?.favorites)) setSharedFavorites(shared.favorites);
         if (Array.isArray(shared?.likes)) setLikedItems(shared.likes);
         if (Array.isArray(shared?.dislikes)) setDislikedItems(shared.dislikes);
+        if (Array.isArray(shared?.follows)) setFollows(shared.follows);
       } catch {}
     })();
   }, []);
@@ -1224,6 +1234,7 @@ function CeSoir() {
     historyOpen && { key: "history", close: () => setHistoryOpen(false) },
     settingsOpen && { key: "settings", close: () => setSettingsOpen(false) },
     fluxOpen && { key: "flux", close: () => setFluxOpen(false) },
+    episodesOpen && { key: "episodes", close: () => setEpisodesOpen(false) },
     surpriseInfoOpen && { key: "surpriseInfo", close: () => setSurpriseInfoOpen(false) },
     surpriseMenuOpen && { key: "surpriseMenu", close: () => setSurpriseMenuOpen(false) },
     keywordDrawerOpen && { key: "keyword", close: () => setKeywordDrawerOpen(false) },
@@ -2158,6 +2169,123 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
 
   function markSeenElsewhere(item) { recordSeen(item); showToast("Marqué comme déjà vu"); }
 
+  // ---------------------------------------------------------------------------
+  // Prochains épisodes
+  // ---------------------------------------------------------------------------
+  function toggleFollow(item) {
+    const key = `tv-${item.id}`;
+    if (follows.some((f) => f.key === key)) {
+      setFollows((prev) => prev.filter((f) => f.key !== key));
+      sharedFetch("/follow-remove", { method: "POST", body: { key } }).catch(() => {});
+      showToast("Série plus suivie");
+    } else {
+      const fav = { key, id: item.id, media_type: "tv", title: titleOf(item), poster: item.poster_path, year: yearOf(item) };
+      setFollows((prev) => [fav, ...prev]);
+      sharedFetch("/follow-add", { method: "POST", body: { item: fav } }).catch(() => {});
+      showToast("Série suivie 🔔 — visible dans Prochains épisodes");
+    }
+  }
+
+  // Toutes les séries à surveiller, avec leur(s) origine(s) : Suivies, Déjà vu, J'aime, Perso,
+  // Foyer, et l'historique Netflix (seulement les titres déjà reconnus sur TMDB, c'est-à-dire
+  // ceux dont l'historique a déjà chargé l'affiche).
+  function collectTrackedSeries() {
+    const map = new Map();
+    const add = (id, title, poster, source) => {
+      if (!id) return;
+      const e = map.get(id) || { id, title, poster, sources: [] };
+      if (!e.sources.includes(source)) e.sources.push(source);
+      if (!e.poster && poster) e.poster = poster;
+      map.set(id, e);
+    };
+    const fromList = (list, source) => list.forEach((f) => { if (f && typeof f === "object" && f.media_type === "tv") add(f.id, f.title, f.poster, source); });
+    fromList(follows, "Suivie");
+    fromList(seenItems, "Déjà vu");
+    fromList(likedItems, "J'aime");
+    fromList(favorites, "Perso");
+    fromList(sharedFavorites, "Foyer");
+    Object.entries(historyPosters || {}).forEach(([title, h]) => { if (h?.mediaType === "tv") add(h.id, title, h.poster, "Netflix"); });
+    return [...map.values()];
+  }
+
+  // Charge la fiche TMDB de chaque série (par paquets de 10, cache TMDB à l'appui), classe les
+  // épisodes, puis envoie au Worker les dates à venir pour la notification du soir.
+  async function loadEpisodes({ silent = false } = {}) {
+    const tracked = collectTrackedSeries();
+    if (!silent) { setEpisodesLoading(true); setEpisodesProgress(""); }
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date());
+    const daysFrom = (d) => Math.round((new Date(`${d}T12:00:00`) - new Date(`${today}T12:00:00`)) / 86400000);
+    const upcoming = [], recent = [], undated = [];
+    let endedCount = 0;
+    for (let i = 0; i < tracked.length; i += 10) {
+      const chunk = await Promise.all(tracked.slice(i, i + 10).map((t) => tmdbFetch(`/tv/${t.id}`).then((d) => ({ t, d })).catch(() => null)));
+      for (const r of chunk) {
+        if (!r || !r.d || r.d.status_code) continue;
+        const { t, d } = r;
+        const base = { id: d.id, title: d.name || t.title, poster: d.poster_path || t.poster, sources: t.sources };
+        const ep = (e) => e ? `S${e.season_number}·E${e.episode_number}` : "";
+        const nxt = d.next_episode_to_air;
+        const last = d.last_episode_to_air;
+        if (nxt?.air_date) {
+          upcoming.push({ ...base, date: nxt.air_date, inDays: daysFrom(nxt.air_date), label: ep(nxt), epName: nxt.name, newSeason: nxt.episode_number === 1 });
+        } else if (d.status === "Ended" || d.status === "Canceled") {
+          endedCount++;
+        } else {
+          undated.push({ ...base, status: d.status });
+        }
+        if (last?.air_date && daysFrom(last.air_date) <= 0 && daysFrom(last.air_date) >= -14) {
+          recent.push({ ...base, date: last.air_date, inDays: daysFrom(last.air_date), label: ep(last), epName: last.name });
+        }
+      }
+      if (!silent) setEpisodesProgress(`${Math.min(i + 10, tracked.length)} / ${tracked.length} séries`);
+    }
+    upcoming.sort((a, b) => a.date.localeCompare(b.date));
+    recent.sort((a, b) => b.date.localeCompare(a.date));
+    undated.sort((a, b) => a.title.localeCompare(b.title));
+    const data = { upcoming, recent, undated, endedCount, total: tracked.length };
+    setEpisodesData(data);
+    if (!silent) setEpisodesLoading(false);
+    // Notification du soir (Worker, cron) : dates des 60 prochains jours, par personne.
+    if (whoAmI) {
+      const items = upcoming.filter((u) => u.inDays >= 0 && u.inDays <= 60).map((u) => ({ id: u.id, name: u.title, date: u.date, label: u.label }));
+      sharedFetch("/episodes-watch", { method: "POST", body: { email: whoAmI, items } }).catch(() => {});
+      storageSet("episodes-synced-at", String(Date.now()));
+    }
+    return data;
+  }
+
+  // Mise à jour silencieuse au démarrage (au plus une fois toutes les 12 h), pour que les dates
+  // envoyées au Worker restent à jour même sans ouvrir l'écran Prochains épisodes. Passe par une
+  // ref pour lire les listes à jour au moment de l'appel (chargées après le démarrage), pas celles
+  // capturées au premier rendu.
+  const loadEpisodesRef = useRef(null);
+  loadEpisodesRef.current = loadEpisodes;
+  useEffect(() => {
+    if (!whoAmI) return;
+    const t = setTimeout(async () => {
+      try {
+        const last = Number((await storageGet("episodes-synced-at"))?.value) || 0;
+        if (Date.now() - last > 12 * 3600 * 1000) loadEpisodesRef.current({ silent: true });
+      } catch {}
+    }, 8000);
+    return () => clearTimeout(t);
+  }, [whoAmI]);
+
+  function openEpisodes() {
+    setEpisodesOpen(true);
+    loadEpisodes();
+  }
+
+  function formatAirDate(date, inDays) {
+    const d = new Date(`${date}T12:00:00`);
+    const label = d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
+    if (inDays === 0) return `Aujourd'hui · ${label}`;
+    if (inDays === 1) return `Demain · ${label}`;
+    if (inDays === -1) return `Hier · ${label}`;
+    if (inDays > 1) return `Dans ${inDays} j · ${label}`;
+    return `Il y a ${-inDays} j · ${label}`;
+  }
+
   // Bascule déjà vu (vue liste) : recliquer retire, comme les autres boutons de liste.
   function toggleSeen(item) {
     const key = `${item.media_type}-${item.id}`;
@@ -2441,6 +2569,9 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
         <div className="flex items-center gap-2">
           <button onClick={() => setHistoryOpen(true)} aria-label="Historique Netflix" className="rounded-full flex items-center justify-center" style={{ background: C.bgCard, width: 36, height: 36 }}>
             <span aria-hidden="true" style={{ color: "#E50914", fontWeight: 800, fontSize: 17, fontFamily: "'Inter', sans-serif", lineHeight: 1 }}>N</span>
+          </button>
+          <button onClick={openEpisodes} aria-label="Prochains épisodes" className="p-2 rounded-full" style={{ background: C.bgCard }}>
+            <Icon name="calendar" color={C.inkMuted} />
           </button>
           <button onClick={() => setFluxOpen(true)} aria-label="Flux de découverte" className="p-2 rounded-full" style={{ background: activeFeed ? C.amber : C.bgCard }}>
             <Icon name="rss" color={activeFeed ? "#1A1305" : C.inkMuted} />
@@ -2897,6 +3028,63 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
           </div>
         );
       })()}
+
+      {episodesOpen && (
+        <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setEpisodesOpen(false)}>
+          <div className="w-full rounded-t-2xl p-5 overflow-y-auto" style={{ background: C.bgCard, borderTop: `1px solid ${C.border}`, maxHeight: "85vh" }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="font-display text-xl">Prochains épisodes</h3>
+              <button onClick={() => setEpisodesOpen(false)} aria-label="Fermer"><Icon name="x" size={20} color={C.inkMuted} /></button>
+            </div>
+            <p className="text-xs mb-4" style={{ color: C.inkMuted }}>
+              Séries suivies, déjà vues, aimées, en Perso / Foyer et de l'historique Netflix. Notification le jour de sortie d'un épisode si les notifications sont activées.
+            </p>
+            {episodesLoading && (
+              <div className="flex flex-col items-center gap-2 py-6">
+                <Icon name="loader" color={C.amber} size={22} />
+                {episodesProgress && <p className="text-xs" style={{ color: C.inkMuted }}>{episodesProgress}</p>}
+              </div>
+            )}
+            {!episodesLoading && episodesData && (() => {
+              const row = (e, dateText, highlight) => (
+                <button key={`${e.id}-${e.date || "x"}`} onClick={() => { setEpisodesOpen(false); openDetail({ id: e.id, media_type: "tv" }); }}
+                  className="w-full flex items-center gap-3 py-2 text-left" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <img src={e.poster ? `https://image.tmdb.org/t/p/w92${e.poster}` : FALLBACK_POSTER} alt="" className="w-10 h-14 object-cover rounded shrink-0" style={{ background: C.bg }} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm truncate">{e.title}</p>
+                    {e.label && <p className="text-xs truncate" style={{ color: C.inkMuted }}>{e.label}{e.newSeason ? " · nouvelle saison" : ""}{e.epName ? ` · ${e.epName}` : ""}</p>}
+                    <p className="font-mono text-[10px] truncate" style={{ color: C.inkMuted }}>{e.sources.join(" · ")}</p>
+                  </div>
+                  {dateText && <span className="text-[11px] font-medium text-right shrink-0" style={{ color: highlight ? C.amber : C.inkMuted, maxWidth: 110 }}>{dateText}</span>}
+                </button>
+              );
+              const { upcoming, recent, undated, endedCount, total } = episodesData;
+              return (
+                <>
+                  <p className="text-xs font-mono tracking-widest mb-1" style={{ color: C.amberDim }}>À VENIR ({upcoming.length})</p>
+                  {upcoming.length === 0 && <p className="text-xs mb-3" style={{ color: C.inkMuted }}>Aucun épisode daté pour l'instant.</p>}
+                  <div className="mb-4">{upcoming.map((e) => row(e, formatAirDate(e.date, e.inDays), e.inDays <= 7))}</div>
+                  {recent.length > 0 && (
+                    <>
+                      <p className="text-xs font-mono tracking-widest mb-1" style={{ color: C.amberDim }}>SORTIS CES 15 DERNIERS JOURS ({recent.length})</p>
+                      <div className="mb-4">{recent.map((e) => row(e, formatAirDate(e.date, e.inDays), e.inDays === 0))}</div>
+                    </>
+                  )}
+                  {undated.length > 0 && (
+                    <>
+                      <p className="text-xs font-mono tracking-widest mb-1" style={{ color: C.amberDim }}>EN COURS, PAS ENCORE DE DATE ({undated.length})</p>
+                      <div className="mb-4">{undated.map((e) => row(e, e.status === "In Production" || e.status === "Planned" ? "En production" : "", false))}</div>
+                    </>
+                  )}
+                  <p className="text-[11px]" style={{ color: C.inkMuted }}>
+                    {total} série{total > 1 ? "s" : ""} surveillée{total > 1 ? "s" : ""}{endedCount ? ` · ${endedCount} terminée${endedCount > 1 ? "s" : ""} ou annulée${endedCount > 1 ? "s" : ""} (masquée${endedCount > 1 ? "s" : ""})` : ""}. Pour en ajouter une : bouton « Suivre » dans sa fiche.
+                  </p>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
       {fluxOpen && (
         <div className="fixed inset-0 z-50 flex items-end" style={{ background: "#000000a0" }} onClick={() => setFluxOpen(false)}>
@@ -3405,6 +3593,17 @@ Le foyer aime ces titres (avec leurs genres) : ${likedTitles.join(", ")}. Si l'e
                         <Icon name="home" size={16} color={isSharedFavD ? "#0A1614" : C.teal} fill={isSharedFavD ? "#0A1614" : "none"} /> {isSharedFavD ? "En foyer ✓" : "Foyer"}
                       </button>
                     </div>
+                    {detailItem.media_type === "tv" && (() => {
+                      const followed = follows.some((f) => f.key === `tv-${d.id}`);
+                      return (
+                        <button onClick={() => toggleFollow({ id: d.id, name: d.name, poster_path: d.poster_path, first_air_date: d.first_air_date })}
+                          className="w-full mt-2 rounded-full py-2.5 text-sm font-medium flex items-center justify-center gap-2" aria-pressed={followed}
+                          style={{ background: followed ? C.amber : C.bg, color: followed ? "#1A1305" : C.ink, border: `1px solid ${followed ? C.amber : C.border}` }}>
+                          <Icon name="bell" size={15} color={followed ? "#1A1305" : C.amber} fill={followed ? "#1A1305" : "none"} />
+                          {followed ? "Série suivie ✓" : "Suivre les prochains épisodes"}
+                        </button>
+                      );
+                    })()}
                     <button onClick={() => moreLikeThis({ id: d.id, media_type: detailItem.media_type, title })}
                       className="w-full mt-2 rounded-full py-2.5 text-sm font-medium flex items-center justify-center gap-2"
                       style={{ background: C.bg, color: C.teal, border: `1px solid ${C.border}` }}>

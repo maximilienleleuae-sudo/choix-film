@@ -152,10 +152,10 @@ export default {
         const writeList = async (key, list) => env.CE_SOIR_KV.put(key, JSON.stringify(list));
 
         if (url.pathname === "/shared/state" && request.method === "GET") {
-          const [seen, favorites, likes, dislikes] = await Promise.all([
-            readList("seen"), readList("favorites"), readList("likes"), readList("dislikes"),
+          const [seen, favorites, likes, dislikes, follows] = await Promise.all([
+            readList("seen"), readList("favorites"), readList("likes"), readList("dislikes"), readList("follows"),
           ]);
-          return new Response(JSON.stringify({ seen, favorites, likes, dislikes }), { headers: jsonHeaders });
+          return new Response(JSON.stringify({ seen, favorites, likes, dislikes, follows }), { headers: jsonHeaders });
         }
 
         // Listes d'objets (titre/poster/genres) partagées : seen (déjà vu), favorites (sélection),
@@ -163,7 +163,8 @@ export default {
         // pour les 4 — "seen" stockait auparavant juste des clés (string) ; les anciennes entrées
         // de ce format sont tolérées en lecture (readList ne les modifie pas, le front les affiche
         // en dégradé faute de titre/affiche).
-        const itemLists = { seen: "seen", favorite: "favorites", like: "likes", dislike: "dislikes" };
+        // follow (séries suivies, bouton « Suivre » des fiches séries) : liste foyer, même schéma.
+        const itemLists = { seen: "seen", favorite: "favorites", like: "likes", dislike: "dislikes", follow: "follows" };
         for (const [prefix, storeKey] of Object.entries(itemLists)) {
           if (url.pathname === `/shared/${prefix}-add` && request.method === "POST") {
             const { item, by } = await request.json();
@@ -213,6 +214,18 @@ export default {
           const { email } = await request.json();
           if (KNOWN_EMAILS.includes(email)) await env.CE_SOIR_KV.delete(`push-sub:${email}`);
           return new Response(JSON.stringify({ ok: true }), { headers: jsonHeaders });
+        }
+        // Prochains épisodes : l'app envoie, par personne, la liste des séries suivies avec la date
+        // du prochain épisode (déjà calculée côté app depuis TMDB). Le cron du soir n'a donc aucun
+        // appel TMDB à faire : il compare juste ces dates à la date du jour.
+        if (url.pathname === "/shared/episodes-watch" && request.method === "POST") {
+          const { email, items } = await request.json();
+          if (!KNOWN_EMAILS.includes(email) || !Array.isArray(items)) {
+            return new Response(JSON.stringify({ error: "Requête invalide" }), { status: 400, headers: jsonHeaders });
+          }
+          const clean = items.slice(0, 300).map((it) => ({ id: it.id, name: String(it.name || "").slice(0, 120), date: String(it.date || ""), label: String(it.label || "").slice(0, 40) }));
+          await env.CE_SOIR_KV.put(`ep-watch:${email}`, JSON.stringify(clean));
+          return new Response(JSON.stringify({ ok: true, count: clean.length }), { headers: jsonHeaders });
         }
         if (url.pathname === "/shared/ping" && request.method === "POST") {
           const { email } = await request.json();
@@ -475,6 +488,34 @@ export default {
   // ont déjà ouvert l'app dans les 3 dernières heures (déjà engagées ce soir, pas besoin de
   // les relancer) — voir /shared/ping, appelé une fois par le frontend à chaque ouverture.
   async scheduled(event, env, ctx) {
+    // 1) Nouveaux épisodes du jour (séries suivies, voir /shared/episodes-watch). Envoyé à tous les
+    //    abonnés concernés, même s'ils ont ouvert l'app récemment. Une seule notif par personne,
+    //    regroupant toutes les séries du jour ; une clé KV temporaire évite tout doublon si le cron
+    //    tournait deux fois le même jour.
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" }).format(new Date()); // AAAA-MM-JJ
+    for (const email of KNOWN_EMAILS) {
+      try {
+        const subRaw = await env.CE_SOIR_KV.get(`push-sub:${email}`);
+        const watchRaw = await env.CE_SOIR_KV.get(`ep-watch:${email}`);
+        if (!subRaw || !watchRaw) continue;
+        const doneKey = `ep-notified:${email}:${today}`;
+        if (await env.CE_SOIR_KV.get(doneKey)) continue;
+        const todays = JSON.parse(watchRaw).filter((it) => it.date === today);
+        if (!todays.length) continue;
+        const body = todays.slice(0, 4).map((it) => `${it.name}${it.label ? ` ${it.label}` : ""}`).join(", ")
+          + (todays.length > 4 ? ` et ${todays.length - 4} autre${todays.length - 4 > 1 ? "s" : ""}` : "");
+        const status = await sendWebPush(JSON.parse(subRaw), {
+          title: todays.length > 1 ? "Nouveaux épisodes aujourd'hui 📺" : "Nouvel épisode aujourd'hui 📺",
+          body,
+          icon: "./icon-192.png",
+          url: "./",
+        }, env);
+        if (status === 404 || status === 410) await env.CE_SOIR_KV.delete(`push-sub:${email}`);
+        else await env.CE_SOIR_KV.put(doneKey, "1", { expirationTtl: 3 * 24 * 3600 });
+      } catch (err) { /* une série ou une personne en échec ne bloque pas le reste du cron */ }
+    }
+
+    // 2) Rappel du soir habituel.
     const SKIP_IF_SEEN_WITHIN_MS = 3 * 60 * 60 * 1000;
     for (const email of KNOWN_EMAILS) {
       const subRaw = await env.CE_SOIR_KV.get(`push-sub:${email}`);
